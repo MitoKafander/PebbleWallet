@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pebble Wallet Settings</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 15px; background: #f5f5f5; }
+h1 { font-size: 22px; margin-bottom: 20px; color: #333; }
+h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
+.card { background: white; border-radius: 10px; padding: 15px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.card-name { font-weight: bold; font-size: 16px; }
+.card-data { font-family: monospace; font-size: 12px; color: #666; word-break: break-all; }
+.card-format { font-size: 11px; color: #999; margin-top: 5px; }
+.btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.btn-delete { background: #ff3b30; color: white; }
+.btn-primary { background: #007aff; color: white; width: 100%; padding: 15px; font-size: 16px; }
+.btn-save { background: #34c759; color: white; width: 100%; padding: 15px; font-size: 16px; margin-top: 20px; }
+.form-group { margin-bottom: 15px; }
+.form-group label { display: block; margin-bottom: 5px; font-weight: 500; color: #333; }
+.form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
+.empty-state { text-align: center; padding: 40px 20px; color: #666; }
+.section { background: white; border-radius: 10px; padding: 15px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+</style>
+</head>
+<body>
+
+<h1>Pebble Wallet</h1>
+
+<h2 id="cardsHeader">Your Cards (0)</h2>
+<div id="cardsList">
+  <div class="empty-state">
+    <p>No cards added yet.</p>
+    <p>Add your first loyalty card below!</p>
+  </div>
+</div>
+
+<h2>Add New Card</h2>
+<div class="section">
+  <div class="form-group">
+    <label for="cardName">Card Name</label>
+    <input type="text" id="cardName" placeholder="e.g., Starbucks, Target" maxlength="31">
+  </div>
+  <div class="form-group">
+    <label for="cardData">Barcode Number</label>
+    <input type="text" id="cardData" placeholder="Enter barcode number" maxlength="63">
+  </div>
+  <div class="form-group">
+    <label for="cardFormat">Barcode Format</label>
+    <select id="cardFormat">
+      <option value="0">Code 128 (Most common)</option>
+      <option value="1">Code 39 (Older systems)</option>
+      <option value="2">EAN-13 (Retail)</option>
+      <option value="3">QR Code</option>
+    </select>
+  </div>
+  <button class="btn btn-primary" onclick="addCard()">Add Card</button>
+</div>
+
+<button class="btn btn-save" onclick="saveAndClose()">Save &amp; Sync to Watch</button>
+
+<script>
+// Parse cards from URL hash (passed by Pebble app)
+var cards = [];
+if (location.hash && location.hash.length > 1) {
+  try {
+    cards = JSON.parse(decodeURIComponent(location.hash.substring(1)));
+  } catch(e) {
+    cards = [];
+  }
+}
+
+var formatNames = ['Code 128', 'Code 39', 'EAN-13', 'QR Code'];
+
+function escapeHtml(text) {
+  var div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function renderCards() {
+  var list = document.getElementById('cardsList');
+  document.getElementById('cardsHeader').textContent = 'Your Cards (' + cards.length + ')';
+
+  if (cards.length === 0) {
+    list.innerHTML = '<div class="empty-state"><p>No cards added yet.</p><p>Add your first loyalty card below!</p></div>';
+    return;
+  }
+
+  var html = '';
+  cards.forEach(function(card, i) {
+    html += '<div class="card">'
+      + '<div class="card-header">'
+      + '<span class="card-name">' + escapeHtml(card.name) + '</span>'
+      + '<button class="btn btn-delete" onclick="deleteCard(' + i + ')">Delete</button>'
+      + '</div>'
+      + '<div class="card-data">' + escapeHtml(card.data) + '</div>'
+      + '<div class="card-format">' + formatNames[card.format || 0] + '</div>'
+      + '</div>';
+  });
+  list.innerHTML = html;
+}
+
+function addCard() {
+  var name = document.getElementById('cardName').value.trim();
+  var data = document.getElementById('cardData').value.trim();
+  var format = parseInt(document.getElementById('cardFormat').value);
+
+  if (!name || !data) {
+    alert('Please enter both card name and barcode number');
+    return;
+  }
+  if (cards.length >= 10) {
+    alert('Maximum 10 cards allowed');
+    return;
+  }
+
+  cards.push({ name: name, data: data, format: format });
+  document.getElementById('cardName').value = '';
+  document.getElementById('cardData').value = '';
+  renderCards();
+}
+
+function deleteCard(index) {
+  if (confirm('Delete ' + cards[index].name + '?')) {
+    cards.splice(index, 1);
+    renderCards();
+  }
+}
+
+function saveAndClose() {
+  var result = encodeURIComponent(JSON.stringify(cards));
+  document.location = 'pebblejs://close#' + result;
+}
+
+// Render on load
+renderCards();
+</script>
+
+</body>
+</html>
