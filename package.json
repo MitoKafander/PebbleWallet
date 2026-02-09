@@ -1,0 +1,38 @@
+{
+  "name": "pebble-wallet",
+  "author": "mitokafander",
+  "version": "2.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Pebble Wallet",
+    "uuid": "b5f9e3a2-7d4c-4b8f-9f6e-3d6c2b0a4e7f",
+    "sdkVersion": "3",
+    "enableMultiJS": false,
+    "targetPlatforms": ["aplite", "basalt", "chalk"],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "CMD_SYNC_START",
+      "CMD_SYNC_COMPLETE",
+      "KEY_INDEX",
+      "KEY_NAME",
+      "KEY_DESCRIPTION",
+      "KEY_DATA",
+      "KEY_FORMAT",
+      "REQUEST_CARDS",
+      "CONFIG_UPDATED",
+      "CARD_COUNT",
+      "CARD_INDEX",
+      "CARD_NAME",
+      "CARD_DATA",
+      "CARD_FORMAT"
+    ],
+    "capabilities": ["configurable"],
+    "resources": {
+      "media": []
+    }
+  }
+}

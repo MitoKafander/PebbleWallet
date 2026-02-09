@@ -43,7 +43,11 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
   </div>
   <div class="form-group">
     <label for="cardData">Barcode Number</label>
-    <input type="text" id="cardData" placeholder="Enter barcode number" maxlength="63">
+    <input type="text" id="cardData" placeholder="Enter barcode number" maxlength="1023">
+  </div>
+  <div class="form-group">
+    <label for="cardDesc">Description (optional)</label>
+    <input type="text" id="cardDesc" placeholder="e.g., Rewards Card, Gate B12" maxlength="31">
   </div>
   <div class="form-group">
     <label for="cardFormat">Barcode Format</label>
@@ -52,6 +56,8 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
       <option value="1">Code 39 (Older systems)</option>
       <option value="2">EAN-13 (Retail)</option>
       <option value="3">QR Code</option>
+      <option value="4">Aztec (Boarding passes)</option>
+      <option value="5">PDF417 (Documents)</option>
     </select>
   </div>
   <button class="btn btn-primary" onclick="addCard()">Add Card</button>
@@ -70,7 +76,7 @@ if (location.hash && location.hash.length > 1) {
   }
 }
 
-var formatNames = ['Code 128', 'Code 39', 'EAN-13', 'QR Code'];
+var formatNames = ['Code 128', 'Code 39', 'EAN-13', 'QR Code', 'Aztec', 'PDF417'];
 
 function escapeHtml(text) {
   var div = document.createElement('div');
@@ -94,8 +100,9 @@ function renderCards() {
       + '<span class="card-name">' + escapeHtml(card.name) + '</span>'
       + '<button class="btn btn-delete" onclick="deleteCard(' + i + ')">Delete</button>'
       + '</div>'
-      + '<div class="card-data">' + escapeHtml(card.data) + '</div>'
-      + '<div class="card-format">' + formatNames[card.format || 0] + '</div>'
+      + (card.description ? '<div class="card-data" style="color:#333;margin-bottom:4px">' + escapeHtml(card.description) + '</div>' : '')
+      + '<div class="card-data">' + escapeHtml(card.data.length > 40 ? card.data.substring(0,40) + '...' : card.data) + '</div>'
+      + '<div class="card-format">' + (formatNames[card.format || 0] || 'Unknown') + '</div>'
       + '</div>';
   });
   list.innerHTML = html;
@@ -115,8 +122,10 @@ function addCard() {
     return;
   }
 
-  cards.push({ name: name, data: data, format: format });
+  var desc = document.getElementById('cardDesc').value.trim();
+  cards.push({ name: name, description: desc, data: data, format: format });
   document.getElementById('cardName').value = '';
+  document.getElementById('cardDesc').value = '';
   document.getElementById('cardData').value = '';
   renderCards();
 }
