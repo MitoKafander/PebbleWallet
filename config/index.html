@@ -3,6 +3,7 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pebble Wallet Settings</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bwip-js/3.4.3/bwip-js-min.js"></script>
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 15px; background: #f5f5f5; }
 h1 { font-size: 22px; margin-bottom: 20px; color: #333; }
@@ -12,6 +13,10 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 .card-name { font-weight: bold; font-size: 16px; }
 .card-data { font-family: monospace; font-size: 12px; color: #666; word-break: break-all; }
 .card-format { font-size: 11px; color: #999; margin-top: 5px; }
+.card-preview { text-align: center; margin-top: 10px; padding: 8px; background: #f9f9f9; border-radius: 6px; }
+.card-preview canvas { max-width: 100%; height: auto; }
+.card-preview .error { color: #ff3b30; font-size: 12px; }
+.card-preview .ok { color: #34c759; font-size: 12px; }
 .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
 .btn-delete { background: #ff3b30; color: white; }
 .btn-primary { background: #007aff; color: white; width: 100%; padding: 15px; font-size: 16px; }
@@ -21,6 +26,7 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
 .empty-state { text-align: center; padding: 40px 20px; color: #666; }
 .section { background: white; border-radius: 10px; padding: 15px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.preview-canvas { display: none; }
 </style>
 </head>
 <body>
@@ -42,8 +48,8 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
     <input type="text" id="cardName" placeholder="e.g., Starbucks, Target" maxlength="31">
   </div>
   <div class="form-group">
-    <label for="cardData">Barcode Number</label>
-    <input type="text" id="cardData" placeholder="Enter barcode number" maxlength="1023">
+    <label for="cardData">Barcode Data</label>
+    <input type="text" id="cardData" placeholder="Enter barcode number or text" maxlength="1023">
   </div>
   <div class="form-group">
     <label for="cardDesc">Description (optional)</label>
@@ -63,9 +69,23 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
   <button class="btn btn-primary" onclick="addCard()">Add Card</button>
 </div>
 
-<button class="btn btn-save" onclick="saveAndClose()">Save &amp; Sync to Watch</button>
+<button class="btn btn-save" id="saveBtn" onclick="saveAndClose()">Save &amp; Sync to Watch</button>
+
+<canvas id="render-canvas" class="preview-canvas"></canvas>
 
 <script>
+// bwip-js symbology mapping
+var FORMATS = [
+  {id: 0, name: 'Code 128', bwip: 'code128'},
+  {id: 1, name: 'Code 39', bwip: 'code39'},
+  {id: 2, name: 'EAN-13', bwip: 'ean13'},
+  {id: 3, name: 'QR Code', bwip: 'qrcode'},
+  {id: 4, name: 'Aztec', bwip: 'azteccode'},
+  {id: 5, name: 'PDF417', bwip: 'pdf417'}
+];
+
+var formatNames = ['Code 128', 'Code 39', 'EAN-13', 'QR Code', 'Aztec', 'PDF417'];
+
 // Parse cards from URL hash (passed by Pebble app)
 var cards = [];
 if (location.hash && location.hash.length > 1) {
@@ -76,12 +96,61 @@ if (location.hash && location.hash.length > 1) {
   }
 }
 
-var formatNames = ['Code 128', 'Code 39', 'EAN-13', 'QR Code', 'Aztec', 'PDF417'];
-
 function escapeHtml(text) {
   var div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+// Generate pre-rendered barcode matrix data using bwip-js
+// Returns promise resolving to "width,height,hexdata" string
+function generateMatrixData(text, formatId) {
+  return new Promise(function(resolve, reject) {
+    var canvas = document.getElementById('render-canvas');
+    var fmt = FORMATS[formatId];
+    if (!fmt) { reject('Unknown format'); return; }
+
+    try {
+      var options = {
+        bcid: fmt.bwip,
+        text: text,
+        scale: 1,
+        includetext: false,
+        paddingwidth: 0,
+        paddingheight: 0
+      };
+
+      // Format-specific options
+      if (formatId == 5) { options.columns = 2; options.eclevel = 1; } // PDF417
+      else if (formatId < 3) { options.height = 10; } // 1D barcodes
+
+      bwipjs.toCanvas(canvas, options);
+
+      var w = canvas.width, h = canvas.height;
+      var pixels = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+      var hex = '', val = 0, bitCount = 0;
+
+      for (var r = 0; r < h; r++) {
+        for (var c = 0; c < w; c++) {
+          var idx = (r * w + c) * 4;
+          var isBlack = (pixels[idx + 3] > 128) && (pixels[idx] < 128);
+          val = (val << 1) | (isBlack ? 1 : 0);
+          if (++bitCount == 4) {
+            hex += val.toString(16).toUpperCase();
+            val = 0; bitCount = 0;
+          }
+        }
+      }
+      if (bitCount > 0) {
+        val = val << (4 - bitCount);
+        hex += val.toString(16).toUpperCase();
+      }
+
+      resolve(w + ',' + h + ',' + hex);
+    } catch (e) {
+      reject(e);
+    }
+  });
 }
 
 function renderCards() {
@@ -95,17 +164,43 @@ function renderCards() {
 
   var html = '';
   cards.forEach(function(card, i) {
+    var displayData = card.text || card.data || '';
+    // Don't show raw hex matrix data
+    if (displayData.indexOf(',') > -1 && displayData.length > 50) {
+      displayData = '[Pre-rendered barcode]';
+    } else if (displayData.length > 40) {
+      displayData = displayData.substring(0, 40) + '...';
+    }
+
     html += '<div class="card">'
       + '<div class="card-header">'
       + '<span class="card-name">' + escapeHtml(card.name) + '</span>'
       + '<button class="btn btn-delete" onclick="deleteCard(' + i + ')">Delete</button>'
       + '</div>'
       + (card.description ? '<div class="card-data" style="color:#333;margin-bottom:4px">' + escapeHtml(card.description) + '</div>' : '')
-      + '<div class="card-data">' + escapeHtml(card.data.length > 40 ? card.data.substring(0,40) + '...' : card.data) + '</div>'
+      + '<div class="card-data">' + escapeHtml(displayData) + '</div>'
       + '<div class="card-format">' + (formatNames[card.format || 0] || 'Unknown') + '</div>'
+      + '<div class="card-preview" id="preview-' + i + '"></div>'
       + '</div>';
   });
   list.innerHTML = html;
+
+  // Generate previews for each card
+  cards.forEach(function(card, i) {
+    var previewDiv = document.getElementById('preview-' + i);
+    var inputText = card.text || card.data || '';
+    if (!inputText || (inputText.indexOf(',') > -1 && inputText.length > 50)) {
+      if (card.data && card.data.indexOf(',') > -1) {
+        previewDiv.innerHTML = '<span class="ok">Barcode encoded</span>';
+      }
+      return;
+    }
+    generateMatrixData(inputText, card.format || 0).then(function() {
+      previewDiv.innerHTML = '<span class="ok">Barcode valid</span>';
+    }).catch(function(e) {
+      previewDiv.innerHTML = '<span class="error">Error: ' + escapeHtml(String(e)) + '</span>';
+    });
+  });
 }
 
 function addCard() {
@@ -114,7 +209,7 @@ function addCard() {
   var format = parseInt(document.getElementById('cardFormat').value);
 
   if (!name || !data) {
-    alert('Please enter both card name and barcode number');
+    alert('Please enter both card name and barcode data');
     return;
   }
   if (cards.length >= 10) {
@@ -123,7 +218,7 @@ function addCard() {
   }
 
   var desc = document.getElementById('cardDesc').value.trim();
-  cards.push({ name: name, description: desc, data: data, format: format });
+  cards.push({ name: name, description: desc, text: data, data: '', format: format });
   document.getElementById('cardName').value = '';
   document.getElementById('cardDesc').value = '';
   document.getElementById('cardData').value = '';
@@ -137,9 +232,37 @@ function deleteCard(index) {
   }
 }
 
+// Pre-render all barcodes via bwip-js then save
 function saveAndClose() {
-  var result = encodeURIComponent(JSON.stringify(cards));
-  document.location = 'pebblejs://close#' + result;
+  var btn = document.getElementById('saveBtn');
+  btn.innerText = 'Encoding barcodes...';
+  btn.disabled = true;
+
+  var promises = [];
+  cards.forEach(function(card, i) {
+    var inputText = card.text || card.data || '';
+    if (!card.name || !inputText) return;
+
+    // Only re-encode if not already pre-rendered
+    if (!card.data || card.data.indexOf(',') === -1) {
+      var p = generateMatrixData(inputText, card.format || 0).then(function(matrixData) {
+        card.text = inputText;
+        card.data = matrixData;
+      }).catch(function(e) {
+        alert('Error encoding "' + card.name + '": ' + e);
+        throw e;
+      });
+      promises.push(p);
+    }
+  });
+
+  Promise.all(promises).then(function() {
+    var result = encodeURIComponent(JSON.stringify(cards));
+    document.location = 'pebblejs://close#' + result;
+  }).catch(function() {
+    btn.innerText = 'Save & Sync to Watch';
+    btn.disabled = false;
+  });
 }
 
 // Render on load

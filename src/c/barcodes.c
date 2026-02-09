@@ -270,105 +270,85 @@ static void draw_code128_barcode(GContext *ctx, GRect bounds, const char *data) 
 }
 
 // ============================================================================
-// Pre-rendered Matrix Drawing (for Aztec, PDF417, phone-generated QR)
-// Data format: "width,height,hexdata"
-// Uses RLE optimization - groups consecutive black pixels into single rectangles
+// Universal Bit-Matrix Renderer (for pre-rendered barcodes from bwip-js)
+// Handles 1D barcodes (rotated 90 degrees) and 2D codes (centered, scaled)
+// Adapted from Gemini version with improved margins and scaling
 // ============================================================================
 
-static void draw_precalc_matrix(GContext *ctx, GRect bounds, const char *data) {
-    int width = 0, height = 0;
-    const char *p = data;
+static void draw_bits_matrix(GContext *ctx, GRect bounds, uint16_t w, uint16_t h, const uint8_t *bits) {
+    if (w == 0 || h == 0 || !bits) return;
 
-    // Parse width
-    while (*p && *p != ',') {
-        if (*p >= '0' && *p <= '9') width = width * 10 + (*p - '0');
-        p++;
-    }
-    if (*p == ',') p++; else return;
+    int sw = bounds.size.w;
+    int sh = bounds.size.h;
 
-    // Parse height
-    while (*p && *p != ',') {
-        if (*p >= '0' && *p <= '9') height = height * 10 + (*p - '0');
-        p++;
-    }
-    if (*p == ',') p++; else return;
+    // Auto-detect 1D vs 2D barcode
+    bool is_1d = (w > h * 2);
+    bool rotate = is_1d;
 
-    if (width <= 0 || height <= 0) return;
+    // Setup dimensions based on rotation
+    int p_axis_max = rotate ? sh : sw; // pattern axis (along barcode bars)
+    int b_axis_max = rotate ? sw : sh; // bar length axis
 
-    // Calculate scale to fit display
-    int avail_w = bounds.size.w - 10;
-    int avail_h = bounds.size.h - 10;
-    int scale_w = avail_w / width;
-    int scale_h = avail_h / height;
-    int scale = (scale_w < scale_h) ? scale_w : scale_h;
+    // Margins: 1D needs quiet zones, 2D needs some breathing room
+    int margin = is_1d ? 6 : 4;
+    int avail_p = p_axis_max - (margin * 2);
+
+    // Scale factor
+    int scale = avail_p / w;
     if (scale < 1) scale = 1;
 
-    int pix_w = width * scale;
-    int pix_h = height * scale;
-    int ox = (bounds.size.w - pix_w) / 2;
-    int oy = (bounds.size.h - pix_h) / 2;
+    // Bar length for 1D codes (use most of the perpendicular axis)
+    int bar_len = is_1d ? (b_axis_max - 20) : (h * scale);
 
-    // White background with quiet zone
+    // Centering offsets
+    int pattern_px = w * scale;
+    int p_offset = (p_axis_max - pattern_px) / 2;
+    int b_offset = (b_axis_max - bar_len) / 2;
+
+    // White background
     graphics_context_set_fill_color(ctx, GColorWhite);
-    graphics_fill_rect(ctx, GRect(ox - 4, oy - 4, pix_w + 8, pix_h + 8), 0, GCornerNone);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_fill_color(ctx, GColorBlack);
 
-    // Check for truncated data
-    int total_pixels = width * height;
-    size_t actual_data_len = strlen(p);
-    if (actual_data_len * 4 < (size_t)total_pixels) {
-        graphics_context_set_text_color(ctx, GColorBlack);
-        graphics_draw_text(ctx, "Data Truncated\nPlease Resync",
-            fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), bounds,
-            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
-        return;
-    }
-
-    // Draw with RLE: group consecutive black pixels into rectangles
-    int current_bit = 0;
-    int row = 0, col = 0;
-    int run_start_col = -1;
-
-    while (*p && current_bit < total_pixels) {
-        char c = *p;
-        int val = 0;
-        if (c >= '0' && c <= '9') val = c - '0';
-        else if (c >= 'A' && c <= 'F') val = c - 'A' + 10;
-        else if (c >= 'a' && c <= 'f') val = c - 'a' + 10;
-
-        for (int b = 3; b >= 0; b--) {
-            if (current_bit >= total_pixels) break;
-            bool is_black = (val & (1 << b));
-            if (is_black) {
-                if (run_start_col == -1) run_start_col = col;
+    // Render with RLE (group consecutive black pixels into rectangles)
+    for (int r = 0; r < (int)h; r++) {
+        int run_start = -1;
+        for (int c = 0; c < (int)w; c++) {
+            int bit_idx = r * w + c;
+            bool is_active = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
+            if (is_active) {
+                if (run_start == -1) run_start = c;
             } else {
-                if (run_start_col != -1) {
-                    int run_width = col - run_start_col;
-                    graphics_fill_rect(ctx, GRect(ox + run_start_col * scale, oy + row * scale, run_width * scale, scale), 0, GCornerNone);
-                    run_start_col = -1;
+                if (run_start != -1) {
+                    int run_w_px = (c - run_start) * scale;
+                    int p_pos = p_offset + run_start * scale;
+                    if (rotate) {
+                        graphics_fill_rect(ctx, GRect(b_offset, p_pos, bar_len, run_w_px), 0, GCornerNone);
+                    } else {
+                        graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * scale, run_w_px, scale), 0, GCornerNone);
+                    }
+                    run_start = -1;
                 }
             }
-            col++;
-            if (col >= width) {
-                if (run_start_col != -1) {
-                    int run_width = col - run_start_col;
-                    graphics_fill_rect(ctx, GRect(ox + run_start_col * scale, oy + row * scale, run_width * scale, scale), 0, GCornerNone);
-                    run_start_col = -1;
-                }
-                col = 0;
-                row++;
-            }
-            current_bit++;
         }
-        p++;
+        // Flush remaining run at end of row
+        if (run_start != -1) {
+            int run_w_px = (w - run_start) * scale;
+            int p_pos = p_offset + run_start * scale;
+            if (rotate) {
+                graphics_fill_rect(ctx, GRect(b_offset, p_pos, bar_len, run_w_px), 0, GCornerNone);
+            } else {
+                graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * scale, run_w_px, scale), 0, GCornerNone);
+            }
+        }
     }
 }
 
 // ============================================================================
-// QR Code Drawing (on-watch generated)
+// QR Code Drawing (on-watch fallback for small alphanumeric QR)
 // ============================================================================
 
-static void draw_qr_code(GContext *ctx, GRect bounds, const char *data) {
+static void draw_qr_code_onwatch(GContext *ctx, GRect bounds, const char *data) {
     uint8_t packed[200];
     uint8_t size = 0;
 
@@ -380,11 +360,9 @@ static void draw_qr_code(GContext *ctx, GRect bounds, const char *data) {
         int ox = (bounds.size.w - pix_size) / 2;
         int oy = (bounds.size.h - pix_size) / 2;
 
-        // White quiet zone
         graphics_context_set_fill_color(ctx, GColorWhite);
         graphics_fill_rect(ctx, GRect(ox - 4, oy - 4, pix_size + 8, pix_size + 8), 0, GCornerNone);
 
-        // Draw modules
         graphics_context_set_fill_color(ctx, GColorBlack);
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
@@ -396,7 +374,7 @@ static void draw_qr_code(GContext *ctx, GRect bounds, const char *data) {
         }
     } else {
         graphics_context_set_text_color(ctx, GColorBlack);
-        graphics_draw_text(ctx, "QR Error",
+        graphics_draw_text(ctx, "QR Too Large",
             fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), bounds,
             GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
     }
@@ -406,30 +384,46 @@ static void draw_qr_code(GContext *ctx, GRect bounds, const char *data) {
 // Main Dispatcher
 // ============================================================================
 
-void barcode_draw(GContext *ctx, GRect bounds, const char *data, BarcodeFormat format) {
+void barcode_draw(GContext *ctx, GRect bounds, BarcodeFormat format,
+                  uint16_t width, uint16_t height, const uint8_t *bits) {
     // Clear background
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+    if (width > 0 && height > 0 && bits) {
+        // Pre-rendered binary data from bwip-js - use universal renderer
+        draw_bits_matrix(ctx, bounds, width, height, bits);
+        return;
+    }
+
+    // Fallback: no pre-rendered data. Bits buffer contains raw text.
+    // This handles demo cards and edge cases.
+    const char *text_data = (const char *)bits;
+    if (!text_data || text_data[0] == '\0') {
+        graphics_context_set_text_color(ctx, GColorBlack);
+        graphics_draw_text(ctx, "No Data\nSync from phone",
+            fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), bounds,
+            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+        return;
+    }
 
     switch (format) {
         case FORMAT_CODE128:
         case FORMAT_CODE39:
         case FORMAT_EAN13:
-            draw_code128_barcode(ctx, bounds, data);
-            break;
-
-        case FORMAT_AZTEC:
-        case FORMAT_PDF417:
-            draw_precalc_matrix(ctx, bounds, data);
+            draw_code128_barcode(ctx, bounds, text_data);
             break;
 
         case FORMAT_QR:
-            // If data starts with a digit, it might be pre-rendered "w,h,hex" format
-            if (data[0] >= '0' && data[0] <= '9' && strchr(data, ',') != NULL) {
-                draw_precalc_matrix(ctx, bounds, data);
-            } else {
-                draw_qr_code(ctx, bounds, data);
-            }
+            draw_qr_code_onwatch(ctx, bounds, text_data);
+            break;
+
+        default:
+            // Aztec/PDF417 without pre-rendering - can't render on watch
+            graphics_context_set_text_color(ctx, GColorBlack);
+            graphics_draw_text(ctx, "Resync from phone",
+                fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), bounds,
+                GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
             break;
     }
 }

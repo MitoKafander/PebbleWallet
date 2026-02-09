@@ -1,8 +1,10 @@
 #include "common.h"
+#include <string.h>
 
 // --- Global State ---
-WalletCard g_cards[MAX_CARDS];
+WalletCardInfo g_cards[MAX_CARDS];
 int g_card_count = 0;
+uint8_t g_active_bits[MAX_BITS_LEN];
 
 static Window *s_main_window;
 static MenuLayer *s_menu_layer;
@@ -17,30 +19,50 @@ static void request_cards_from_phone(void *data);
 
 // ============================================================================
 // Demo Cards (fallback when no phone and no persisted cards)
+// Demo cards use width=0, height=0 to trigger on-watch Code128/QR fallback.
+// The raw text is stored in g_active_bits when the demo card is viewed.
 // ============================================================================
+
+// Static text buffers for demo card data (loaded into g_active_bits on demand)
+static const char *s_demo_data[] = {
+    "6035550123456789",   // Starbucks
+    "4012345678901",      // Target
+    "29857341",           // Library
+    "M1DOE/JOHN E ABC123" // Demo Flight (short enough for on-watch QR)
+};
 
 static void add_demo_cards(void) {
     strncpy(g_cards[0].name, "Starbucks", MAX_NAME_LEN - 1);
     strncpy(g_cards[0].description, "Rewards Card", MAX_NAME_LEN - 1);
-    strncpy(g_cards[0].data, "6035550123456789", MAX_DATA_LEN - 1);
     g_cards[0].format = FORMAT_CODE128;
+    g_cards[0].width = 0; g_cards[0].height = 0; g_cards[0].data_len = 0;
 
     strncpy(g_cards[1].name, "Target Circle", MAX_NAME_LEN - 1);
     strncpy(g_cards[1].description, "Loyalty Program", MAX_NAME_LEN - 1);
-    strncpy(g_cards[1].data, "4012345678901", MAX_DATA_LEN - 1);
     g_cards[1].format = FORMAT_CODE128;
+    g_cards[1].width = 0; g_cards[1].height = 0; g_cards[1].data_len = 0;
 
     strncpy(g_cards[2].name, "Library Card", MAX_NAME_LEN - 1);
     strncpy(g_cards[2].description, "Public Library", MAX_NAME_LEN - 1);
-    strncpy(g_cards[2].data, "29857341", MAX_DATA_LEN - 1);
     g_cards[2].format = FORMAT_CODE128;
+    g_cards[2].width = 0; g_cards[2].height = 0; g_cards[2].data_len = 0;
 
     strncpy(g_cards[3].name, "Demo Flight", MAX_NAME_LEN - 1);
     strncpy(g_cards[3].description, "JFK to LAX", MAX_NAME_LEN - 1);
-    strncpy(g_cards[3].data, "M1DOE/JOHN E ABC123 JFKLAX", MAX_DATA_LEN - 1);
     g_cards[3].format = FORMAT_QR;
+    g_cards[3].width = 0; g_cards[3].height = 0; g_cards[3].data_len = 0;
 
     g_card_count = 4;
+}
+
+// Load demo card text data into g_active_bits as a null-terminated string
+static bool load_demo_data(int index) {
+    if (index < 0 || index >= 4) return false;
+    int len = strlen(s_demo_data[index]);
+    if (len >= MAX_BITS_LEN) len = MAX_BITS_LEN - 1;
+    memcpy(g_active_bits, s_demo_data[index], len);
+    g_active_bits[len] = '\0';
+    return true;
 }
 
 // ============================================================================
@@ -48,7 +70,7 @@ static void add_demo_cards(void) {
 // ============================================================================
 
 static void inbox_received_handler(DictionaryIterator *iter, void *context) {
-    // 1. Check for sync start (clears watch for incoming sync)
+    // 1. Sync start (clears watch for incoming sync)
     Tuple *t_sync_start = dict_find(iter, MESSAGE_KEY_CMD_SYNC_START);
     if (t_sync_start) {
         g_card_count = 0;
@@ -58,15 +80,7 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         return;
     }
 
-    // 2. Check for card count (legacy protocol)
-    Tuple *count_tuple = dict_find(iter, MESSAGE_KEY_CARD_COUNT);
-    if (count_tuple) {
-        // Legacy: just update count, cards arrive separately
-        s_loading = false;
-        return;
-    }
-
-    // 3. Check for card data
+    // 2. Card data (binary protocol with KEY_WIDTH, KEY_HEIGHT, KEY_DATA)
     Tuple *t_idx = dict_find(iter, MESSAGE_KEY_KEY_INDEX);
     Tuple *t_name = dict_find(iter, MESSAGE_KEY_KEY_NAME);
     Tuple *t_data = dict_find(iter, MESSAGE_KEY_KEY_DATA);
@@ -86,14 +100,22 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
                 g_cards[i].description[0] = '\0';
             }
 
-            strncpy(g_cards[i].data, t_data->value->cstring, MAX_DATA_LEN - 1);
-            g_cards[i].data[MAX_DATA_LEN - 1] = '\0';
             g_cards[i].format = (BarcodeFormat)t_fmt->value->int32;
 
-            // Save to persistent storage immediately
-            storage_save_card(i, &g_cards[i]);
+            // Get width and height
+            Tuple *t_w = dict_find(iter, MESSAGE_KEY_KEY_WIDTH);
+            Tuple *t_h = dict_find(iter, MESSAGE_KEY_KEY_HEIGHT);
+            g_cards[i].width = t_w ? (uint16_t)t_w->value->int32 : 0;
+            g_cards[i].height = t_h ? (uint16_t)t_h->value->int32 : 0;
 
-            // Update count if expanding
+            // Binary data from KEY_DATA
+            int data_len = t_data->length;
+            if (data_len > MAX_BITS_LEN) data_len = MAX_BITS_LEN;
+            g_cards[i].data_len = (uint16_t)data_len;
+
+            // Save to persistent storage
+            storage_save_card(i, &g_cards[i], t_data->value->data, data_len);
+
             if (i >= g_card_count) {
                 g_card_count = i + 1;
                 storage_save_count(g_card_count);
@@ -102,59 +124,29 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             s_loading = false;
             menu_layer_reload_data(s_menu_layer);
 
-            // If viewing this card in detail, redraw
+            APP_LOG(APP_LOG_LEVEL_INFO, "Card %d: %s (%dx%d, %d bytes)",
+                    i, g_cards[i].name, g_cards[i].width, g_cards[i].height, data_len);
+
+            // If viewing this card in detail, reload its data and redraw
             if (s_detail_window && window_stack_contains_window(s_detail_window) && s_current_index == i) {
+                storage_load_card_data(i, g_active_bits, MAX_BITS_LEN);
                 layer_mark_dirty(s_barcode_layer);
             }
         }
         return;
     }
 
-    // 4. Legacy: card data with old keys (CARD_INDEX, CARD_NAME, etc.)
-    Tuple *legacy_idx = dict_find(iter, MESSAGE_KEY_CARD_INDEX);
-    Tuple *legacy_name = dict_find(iter, MESSAGE_KEY_CARD_NAME);
-    Tuple *legacy_data = dict_find(iter, MESSAGE_KEY_CARD_DATA);
-    Tuple *legacy_fmt = dict_find(iter, MESSAGE_KEY_CARD_FORMAT);
-
-    if (legacy_idx && legacy_name && legacy_data) {
-        int i = legacy_idx->value->int32;
-        if (i >= 0 && i < MAX_CARDS) {
-            strncpy(g_cards[i].name, legacy_name->value->cstring, MAX_NAME_LEN - 1);
-            g_cards[i].name[MAX_NAME_LEN - 1] = '\0';
-            g_cards[i].description[0] = '\0';
-            strncpy(g_cards[i].data, legacy_data->value->cstring, MAX_DATA_LEN - 1);
-            g_cards[i].data[MAX_DATA_LEN - 1] = '\0';
-            g_cards[i].format = legacy_fmt ? (BarcodeFormat)legacy_fmt->value->int32 : FORMAT_CODE128;
-
-            storage_save_card(i, &g_cards[i]);
-            if (i >= g_card_count) {
-                g_card_count = i + 1;
-                storage_save_count(g_card_count);
-            }
-
-            s_loading = false;
-            menu_layer_reload_data(s_menu_layer);
-        }
-        return;
-    }
-
-    // 5. Sync complete
+    // 3. Sync complete
     Tuple *t_complete = dict_find(iter, MESSAGE_KEY_CMD_SYNC_COMPLETE);
     if (t_complete) {
         APP_LOG(APP_LOG_LEVEL_INFO, "Sync complete: %d cards", g_card_count);
         return;
     }
 
-    // 6. Config updated notification (legacy)
+    // 4. Config updated notification (legacy)
     Tuple *config_tuple = dict_find(iter, MESSAGE_KEY_CONFIG_UPDATED);
     if (config_tuple) {
         request_cards_from_phone(NULL);
-    }
-
-    // 7. Watch requested cards (from phone side)
-    Tuple *request_tuple = dict_find(iter, MESSAGE_KEY_REQUEST_CARDS);
-    if (request_tuple) {
-        // Phone is asking us - but we're the watch, so ignore
     }
 }
 
@@ -172,15 +164,27 @@ static void outbox_failed_callback(DictionaryIterator *iterator, AppMessageResul
 
 static void barcode_update_proc(Layer *layer, GContext *ctx) {
     if (s_current_index >= 0 && s_current_index < g_card_count) {
-        barcode_draw(ctx, layer_get_bounds(layer),
-                     g_cards[s_current_index].data,
-                     g_cards[s_current_index].format);
+        WalletCardInfo *info = &g_cards[s_current_index];
+        barcode_draw(ctx, layer_get_bounds(layer), info->format,
+                     info->width, info->height, g_active_bits);
     }
 }
 
 static void update_card_name_display(void) {
     if (s_card_name_layer && s_current_index >= 0 && s_current_index < g_card_count) {
         text_layer_set_text(s_card_name_layer, g_cards[s_current_index].name);
+    }
+}
+
+static void load_current_card_data(void) {
+    if (s_current_index >= 0 && s_current_index < g_card_count) {
+        if (g_cards[s_current_index].width > 0 && g_cards[s_current_index].data_len > 0) {
+            // Pre-rendered card: load binary data from storage
+            storage_load_card_data(s_current_index, g_active_bits, MAX_BITS_LEN);
+        } else {
+            // Demo card or fallback: load text data
+            load_demo_data(s_current_index);
+        }
     }
 }
 
@@ -194,12 +198,13 @@ static void detail_click_handler(ClickRecognizerRef recognizer, void *context) {
         s_current_index = (s_current_index - 1 + g_card_count) % g_card_count;
     }
 
+    load_current_card_data();
     update_card_name_display();
     layer_mark_dirty(s_barcode_layer);
 }
 
 static void detail_back_handler(ClickRecognizerRef recognizer, void *context) {
-    light_enable(false); // Restore normal brightness
+    light_enable(false);
     window_stack_pop(true);
 }
 
@@ -237,6 +242,9 @@ static void detail_window_unload(Window *window) {
 
 static void show_detail_window(int index) {
     s_current_index = index;
+
+    // Load card data into g_active_bits before showing
+    load_current_card_data();
 
     if (!s_detail_window) {
         s_detail_window = window_create();
@@ -282,7 +290,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
         return;
     }
 
-    WalletCard *c = &g_cards[cell_index->row];
+    WalletCardInfo *c = &g_cards[cell_index->row];
 
     // Draw card name
     graphics_draw_text(ctx, c->name,
@@ -290,17 +298,22 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
         GRect(5, 2, bounds.size.w - 10, 28),
         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    // Draw subtitle: description if available, else format-specific fallback
-    char subtitle[MAX_NAME_LEN];
+    // Draw subtitle
+    const char *subtitle;
+    char fmt_subtitle[MAX_NAME_LEN];
     if (strlen(c->description) > 0) {
-        strncpy(subtitle, c->description, sizeof(subtitle));
-    } else if (c->format == FORMAT_AZTEC || c->format == FORMAT_PDF417) {
-        snprintf(subtitle, sizeof(subtitle), "Boarding Pass Data");
-    } else if (c->format == FORMAT_QR) {
-        snprintf(subtitle, sizeof(subtitle), "QR Code");
+        subtitle = c->description;
     } else {
-        // Data preview (truncated)
-        snprintf(subtitle, sizeof(subtitle), "%.24s...", c->data);
+        static const char *fmt_names[] = {
+            "Code 128", "Code 39", "EAN-13", "QR Code", "Aztec", "PDF417"
+        };
+        int fi = (int)c->format;
+        if (fi >= 0 && fi <= 5) {
+            snprintf(fmt_subtitle, sizeof(fmt_subtitle), "%s", fmt_names[fi]);
+        } else {
+            snprintf(fmt_subtitle, sizeof(fmt_subtitle), "Barcode");
+        }
+        subtitle = fmt_subtitle;
     }
 
     graphics_draw_text(ctx, subtitle,
@@ -349,7 +362,6 @@ static void request_cards_from_phone(void *data) {
 static void loading_timeout(void *data) {
     if (s_loading) {
         s_loading = false;
-        // Only show demo cards if nothing persisted
         if (g_card_count == 0) {
             add_demo_cards();
         }
@@ -365,7 +377,7 @@ static void init(void) {
     // Load persisted cards first
     storage_load_cards();
     if (g_card_count > 0) {
-        s_loading = false; // Already have cards
+        s_loading = false;
     }
 
     // Set up AppMessage
@@ -382,7 +394,7 @@ static void init(void) {
     });
     window_stack_push(s_main_window, true);
 
-    // Request fresh cards from phone (may update persisted ones)
+    // Request fresh cards from phone
     app_timer_register(500, request_cards_from_phone, NULL);
 
     // Timeout: if no response and no persisted cards, show demos
