@@ -275,14 +275,17 @@ static void draw_code128_barcode(GContext *ctx, GRect bounds, const char *data) 
 // Adapted from Gemini version with improved margins and scaling
 // ============================================================================
 
-static void draw_bits_matrix(GContext *ctx, GRect bounds, uint16_t w, uint16_t h, const uint8_t *bits) {
+static void draw_bits_matrix(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
+                             const uint8_t *bits, BarcodeFormat format) {
     if (w == 0 || h == 0 || !bits) return;
 
     int sw = bounds.size.w;
     int sh = bounds.size.h;
 
     // Auto-detect 1D vs 2D barcode
-    bool is_1d = (w > h * 2);
+    // PDF417 is a stacked 2D code with wide aspect ratio - never rotate it
+    bool is_stacked_2d = (format == FORMAT_PDF417);
+    bool is_1d = !is_stacked_2d && (w > h * 2);
     bool rotate = is_1d;
 
     // Setup dimensions based on rotation
@@ -298,7 +301,19 @@ static void draw_bits_matrix(GContext *ctx, GRect bounds, uint16_t w, uint16_t h
     if (scale < 1) scale = 1;
 
     // Bar length for 1D codes (use most of the perpendicular axis)
-    int bar_len = is_1d ? (b_axis_max - 20) : (h * scale);
+    // For stacked 2D codes (PDF417), stretch height to fill available space
+    int bar_len;
+    int row_scale = scale;
+    if (is_1d) {
+        bar_len = b_axis_max - 20;
+    } else if (is_stacked_2d) {
+        // Scale rows independently to use available vertical space
+        row_scale = (sh - (margin * 2)) / h;
+        if (row_scale < 1) row_scale = 1;
+        bar_len = h * row_scale;
+    } else {
+        bar_len = h * scale;
+    }
 
     // Centering offsets
     int pattern_px = w * scale;
@@ -325,7 +340,7 @@ static void draw_bits_matrix(GContext *ctx, GRect bounds, uint16_t w, uint16_t h
                     if (rotate) {
                         graphics_fill_rect(ctx, GRect(b_offset, p_pos, bar_len, run_w_px), 0, GCornerNone);
                     } else {
-                        graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * scale, run_w_px, scale), 0, GCornerNone);
+                        graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * row_scale, run_w_px, row_scale), 0, GCornerNone);
                     }
                     run_start = -1;
                 }
@@ -338,7 +353,7 @@ static void draw_bits_matrix(GContext *ctx, GRect bounds, uint16_t w, uint16_t h
             if (rotate) {
                 graphics_fill_rect(ctx, GRect(b_offset, p_pos, bar_len, run_w_px), 0, GCornerNone);
             } else {
-                graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * scale, run_w_px, scale), 0, GCornerNone);
+                graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * row_scale, run_w_px, row_scale), 0, GCornerNone);
             }
         }
     }
@@ -392,7 +407,7 @@ void barcode_draw(GContext *ctx, GRect bounds, BarcodeFormat format,
 
     if (width > 0 && height > 0 && bits) {
         // Pre-rendered binary data from bwip-js - use universal renderer
-        draw_bits_matrix(ctx, bounds, width, height, bits);
+        draw_bits_matrix(ctx, bounds, width, height, bits, format);
         return;
     }
 

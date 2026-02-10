@@ -17,6 +17,22 @@ static bool s_loading = true;
 // Forward declarations
 static void request_cards_from_phone(void *data);
 
+// Hex string to byte array conversion
+static uint8_t hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+static int hex_to_bytes(const char *hex, uint8_t *out, int max_len) {
+    int len = 0;
+    for (int i = 0; hex[i] && hex[i+1] && len < max_len; i += 2) {
+        out[len++] = (hex_nibble(hex[i]) << 4) | hex_nibble(hex[i+1]);
+    }
+    return len;
+}
+
 // ============================================================================
 // Demo Cards (fallback when no phone and no persisted cards)
 // Demo cards use width=0, height=0 to trigger on-watch Code128/QR fallback.
@@ -93,7 +109,7 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             g_cards[i].name[MAX_NAME_LEN - 1] = '\0';
 
             Tuple *t_desc = dict_find(iter, MESSAGE_KEY_KEY_DESCRIPTION);
-            if (t_desc) {
+            if (t_desc && t_desc->value->cstring[0] != '\0') {
                 strncpy(g_cards[i].description, t_desc->value->cstring, MAX_NAME_LEN - 1);
                 g_cards[i].description[MAX_NAME_LEN - 1] = '\0';
             } else {
@@ -108,13 +124,25 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             g_cards[i].width = t_w ? (uint16_t)t_w->value->int32 : 0;
             g_cards[i].height = t_h ? (uint16_t)t_h->value->int32 : 0;
 
-            // Binary data from KEY_DATA
-            int data_len = t_data->length;
-            if (data_len > MAX_BITS_LEN) data_len = MAX_BITS_LEN;
+            // KEY_DATA arrives as a string (hex for pre-rendered, text for fallback)
+            const char *data_str = t_data->value->cstring;
+            int data_len = 0;
+
+            if (g_cards[i].width > 0 && g_cards[i].height > 0) {
+                // Pre-rendered: decode hex string to binary bytes
+                data_len = hex_to_bytes(data_str, g_active_bits, MAX_BITS_LEN);
+            } else {
+                // Plain text fallback: store as raw text bytes
+                data_len = strlen(data_str);
+                if (data_len >= MAX_BITS_LEN) data_len = MAX_BITS_LEN - 1;
+                memcpy(g_active_bits, data_str, data_len);
+                g_active_bits[data_len] = '\0';
+            }
+
             g_cards[i].data_len = (uint16_t)data_len;
 
             // Save to persistent storage
-            storage_save_card(i, &g_cards[i], t_data->value->data, data_len);
+            storage_save_card(i, &g_cards[i], g_active_bits, data_len);
 
             if (i >= g_card_count) {
                 g_card_count = i + 1;
@@ -124,12 +152,13 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             s_loading = false;
             menu_layer_reload_data(s_menu_layer);
 
-            APP_LOG(APP_LOG_LEVEL_INFO, "Card %d: %s (%dx%d, %d bytes)",
-                    i, g_cards[i].name, g_cards[i].width, g_cards[i].height, data_len);
+            APP_LOG(APP_LOG_LEVEL_INFO, "Card %d: %s desc='%s' (%dx%d, %d bytes, fmt=%d)",
+                    i, g_cards[i].name, g_cards[i].description,
+                    g_cards[i].width, g_cards[i].height, data_len,
+                    (int)g_cards[i].format);
 
             // If viewing this card in detail, reload its data and redraw
             if (s_detail_window && window_stack_contains_window(s_detail_window) && s_current_index == i) {
-                storage_load_card_data(i, g_active_bits, MAX_BITS_LEN);
                 layer_mark_dirty(s_barcode_layer);
             }
         }
@@ -384,7 +413,7 @@ static void init(void) {
     app_message_register_inbox_received(inbox_received_handler);
     app_message_register_inbox_dropped(inbox_dropped_callback);
     app_message_register_outbox_failed(outbox_failed_callback);
-    app_message_open(2048, 256);
+    app_message_open(4096, 256);
 
     // Create main window
     s_main_window = window_create();

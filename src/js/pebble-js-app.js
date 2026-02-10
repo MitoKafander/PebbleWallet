@@ -36,10 +36,11 @@ function sendNextCard(cards, index) {
     }
 
     var c = cards[index];
+    var desc = (c.description !== undefined && c.description !== null) ? String(c.description) : '';
     var dict = {
         'KEY_INDEX': index,
         'KEY_NAME': (c.name || '').substring(0, 31),
-        'KEY_DESCRIPTION': (c.description || '').substring(0, 31),
+        'KEY_DESCRIPTION': desc.substring(0, 31),
         'KEY_FORMAT': parseInt(c.format) || 0
     };
 
@@ -50,30 +51,24 @@ function sendNextCard(cards, index) {
         if (parts.length >= 3) {
             dict['KEY_WIDTH'] = parseInt(parts[0]);
             dict['KEY_HEIGHT'] = parseInt(parts[1]);
-            // Convert hex string to byte array
-            var hex = parts[2];
-            var bytes = [];
-            for (var i = 0; i < hex.length; i += 2) {
-                bytes.push(parseInt(hex.substr(i, 2), 16));
-            }
-            dict['KEY_DATA'] = bytes;
+            // Send hex string directly (not byte array) for Core Devices compatibility
+            dict['KEY_DATA'] = parts[2];
         }
     } else {
         // Plain text fallback (no pre-rendering)
         dict['KEY_WIDTH'] = 0;
         dict['KEY_HEIGHT'] = 0;
-        var bytes = [];
-        for (var i = 0; i < rawData.length; i++) {
-            bytes.push(rawData.charCodeAt(i));
-        }
-        dict['KEY_DATA'] = bytes;
+        dict['KEY_DATA'] = rawData;
     }
 
     console.log('Sending card ' + index + ': ' + c.name +
-        ' (w=' + dict['KEY_WIDTH'] + ' h=' + dict['KEY_HEIGHT'] +
-        ' data=' + (dict['KEY_DATA'] ? dict['KEY_DATA'].length : 0) + ' bytes)');
+        ' desc="' + desc + '"' +
+        ' w=' + dict['KEY_WIDTH'] + ' h=' + dict['KEY_HEIGHT'] +
+        ' data_len=' + (dict['KEY_DATA'] ? dict['KEY_DATA'].length : 0) +
+        ' format=' + dict['KEY_FORMAT']);
 
     Pebble.sendAppMessage(dict, function() {
+        console.log('Card ' + index + ' sent OK');
         sendNextCard(cards, index + 1);
     }, function(e) {
         console.log('Card ' + index + ' failed, retrying: ' + JSON.stringify(e));

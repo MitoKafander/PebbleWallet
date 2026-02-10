@@ -18,7 +18,8 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 .card-preview .error { color: #ff3b30; font-size: 12px; }
 .card-preview .ok { color: #34c759; font-size: 12px; }
 .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
-.btn-delete { background: #ff3b30; color: white; }
+.btn-delete { background: #ff3b30; color: white; margin-left: 5px; }
+.btn-edit { background: #ff9500; color: white; }
 .btn-primary { background: #007aff; color: white; width: 100%; padding: 15px; font-size: 16px; }
 .btn-save { background: #34c759; color: white; width: 100%; padding: 15px; font-size: 16px; margin-top: 20px; }
 .form-group { margin-bottom: 15px; }
@@ -66,7 +67,7 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
       <option value="5">PDF417 (Documents)</option>
     </select>
   </div>
-  <button class="btn btn-primary" onclick="addCard()">Add Card</button>
+  <button class="btn btn-primary" id="addBtn" onclick="addCard()">Add Card</button>
 </div>
 
 <button class="btn btn-save" id="saveBtn" onclick="saveAndClose()">Save &amp; Sync to Watch</button>
@@ -175,6 +176,7 @@ function renderCards() {
     html += '<div class="card">'
       + '<div class="card-header">'
       + '<span class="card-name">' + escapeHtml(card.name) + '</span>'
+      + '<button class="btn btn-edit" onclick="editCard(' + i + ')">Edit</button>'
       + '<button class="btn btn-delete" onclick="deleteCard(' + i + ')">Delete</button>'
       + '</div>'
       + (card.description ? '<div class="card-data" style="color:#333;margin-bottom:4px">' + escapeHtml(card.description) + '</div>' : '')
@@ -203,6 +205,19 @@ function renderCards() {
   });
 }
 
+var editingIndex = -1;
+
+function editCard(index) {
+  var card = cards[index];
+  document.getElementById('cardName').value = card.name || '';
+  document.getElementById('cardData').value = card.text || '';
+  document.getElementById('cardDesc').value = card.description || '';
+  document.getElementById('cardFormat').value = card.format || 0;
+  editingIndex = index;
+  document.getElementById('addBtn').textContent = 'Update Card';
+  document.getElementById('addBtn').scrollIntoView({ behavior: 'smooth' });
+}
+
 function addCard() {
   var name = document.getElementById('cardName').value.trim();
   var data = document.getElementById('cardData').value.trim();
@@ -212,13 +227,25 @@ function addCard() {
     alert('Please enter both card name and barcode data');
     return;
   }
-  if (cards.length >= 10) {
-    alert('Maximum 10 cards allowed');
-    return;
-  }
 
   var desc = document.getElementById('cardDesc').value.trim();
-  cards.push({ name: name, description: desc, text: data, data: '', format: format });
+
+  if (editingIndex >= 0 && editingIndex < cards.length) {
+    cards[editingIndex].name = name;
+    cards[editingIndex].description = desc;
+    cards[editingIndex].text = data;
+    cards[editingIndex].data = '';
+    cards[editingIndex].format = format;
+    editingIndex = -1;
+    document.getElementById('addBtn').textContent = 'Add Card';
+  } else {
+    if (cards.length >= 10) {
+      alert('Maximum 10 cards allowed');
+      return;
+    }
+    cards.push({ name: name, description: desc, text: data, data: '', format: format });
+  }
+
   document.getElementById('cardName').value = '';
   document.getElementById('cardDesc').value = '';
   document.getElementById('cardData').value = '';
