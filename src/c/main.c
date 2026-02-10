@@ -10,28 +10,11 @@ static Window *s_main_window;
 static MenuLayer *s_menu_layer;
 static Window *s_detail_window;
 static Layer *s_barcode_layer;
-static TextLayer *s_card_name_layer;
 static int s_current_index = 0;
 static bool s_loading = true;
 
 // Forward declarations
 static void request_cards_from_phone(void *data);
-
-// Hex string to byte array conversion
-static uint8_t hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return 0;
-}
-
-static int hex_to_bytes(const char *hex, uint8_t *out, int max_len) {
-    int len = 0;
-    for (int i = 0; hex[i] && hex[i+1] && len < max_len; i += 2) {
-        out[len++] = (hex_nibble(hex[i]) << 4) | hex_nibble(hex[i+1]);
-    }
-    return len;
-}
 
 // ============================================================================
 // Demo Cards (fallback when no phone and no persisted cards)
@@ -105,44 +88,20 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
     if (t_idx && t_name && t_data && t_fmt) {
         int i = t_idx->value->int32;
         if (i >= 0 && i < MAX_CARDS) {
-            strncpy(g_cards[i].name, t_name->value->cstring, MAX_NAME_LEN - 1);
-            g_cards[i].name[MAX_NAME_LEN - 1] = '\0';
-
             Tuple *t_desc = dict_find(iter, MESSAGE_KEY_KEY_DESCRIPTION);
-            if (t_desc && t_desc->value->cstring[0] != '\0') {
-                strncpy(g_cards[i].description, t_desc->value->cstring, MAX_NAME_LEN - 1);
-                g_cards[i].description[MAX_NAME_LEN - 1] = '\0';
-            } else {
-                g_cards[i].description[0] = '\0';
-            }
-
-            g_cards[i].format = (BarcodeFormat)t_fmt->value->int32;
-
-            // Get width and height
             Tuple *t_w = dict_find(iter, MESSAGE_KEY_KEY_WIDTH);
             Tuple *t_h = dict_find(iter, MESSAGE_KEY_KEY_HEIGHT);
-            g_cards[i].width = t_w ? (uint16_t)t_w->value->int32 : 0;
-            g_cards[i].height = t_h ? (uint16_t)t_h->value->int32 : 0;
 
-            // KEY_DATA arrives as a string (hex for pre-rendered, text for fallback)
-            const char *data_str = t_data->value->cstring;
-            int data_len = 0;
+            strncpy(g_cards[i].name, t_name->value->cstring, MAX_NAME_LEN - 1);
+            strncpy(g_cards[i].description,
+                    t_desc ? t_desc->value->cstring : "", MAX_NAME_LEN - 1);
+            g_cards[i].format = (BarcodeFormat)t_fmt->value->int32;
+            g_cards[i].width = t_w ? t_w->value->int32 : 0;
+            g_cards[i].height = t_h ? t_h->value->int32 : 0;
+            g_cards[i].data_len = (uint16_t)t_data->length;
 
-            if (g_cards[i].width > 0 && g_cards[i].height > 0) {
-                // Pre-rendered: decode hex string to binary bytes
-                data_len = hex_to_bytes(data_str, g_active_bits, MAX_BITS_LEN);
-            } else {
-                // Plain text fallback: store as raw text bytes
-                data_len = strlen(data_str);
-                if (data_len >= MAX_BITS_LEN) data_len = MAX_BITS_LEN - 1;
-                memcpy(g_active_bits, data_str, data_len);
-                g_active_bits[data_len] = '\0';
-            }
-
-            g_cards[i].data_len = (uint16_t)data_len;
-
-            // Save to persistent storage
-            storage_save_card(i, &g_cards[i], g_active_bits, data_len);
+            // Save binary data directly to persistent storage
+            storage_save_card(i, &g_cards[i], t_data->value->data, t_data->length);
 
             if (i >= g_card_count) {
                 g_card_count = i + 1;
@@ -152,15 +111,10 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             s_loading = false;
             menu_layer_reload_data(s_menu_layer);
 
-            APP_LOG(APP_LOG_LEVEL_INFO, "Card %d: %s desc='%s' (%dx%d, %d bytes, fmt=%d)",
-                    i, g_cards[i].name, g_cards[i].description,
-                    g_cards[i].width, g_cards[i].height, data_len,
+            APP_LOG(APP_LOG_LEVEL_INFO, "Card %d: %s (%dx%d, %d bytes, fmt=%d)",
+                    i, g_cards[i].name,
+                    g_cards[i].width, g_cards[i].height, t_data->length,
                     (int)g_cards[i].format);
-
-            // If viewing this card in detail, reload its data and redraw
-            if (s_detail_window && window_stack_contains_window(s_detail_window) && s_current_index == i) {
-                layer_mark_dirty(s_barcode_layer);
-            }
         }
         return;
     }
@@ -199,21 +153,10 @@ static void barcode_update_proc(Layer *layer, GContext *ctx) {
     }
 }
 
-static void update_card_name_display(void) {
-    if (s_card_name_layer && s_current_index >= 0 && s_current_index < g_card_count) {
-        text_layer_set_text(s_card_name_layer, g_cards[s_current_index].name);
-    }
-}
-
 static void load_current_card_data(void) {
     if (s_current_index >= 0 && s_current_index < g_card_count) {
-        if (g_cards[s_current_index].width > 0 && g_cards[s_current_index].data_len > 0) {
-            // Pre-rendered card: load binary data from storage
-            storage_load_card_data(s_current_index, g_active_bits, MAX_BITS_LEN);
-        } else {
-            // Demo card or fallback: load text data
-            load_demo_data(s_current_index);
-        }
+        // Always load from storage - works for both pre-rendered and text data
+        storage_load_card_data(s_current_index, g_active_bits, MAX_BITS_LEN);
     }
 }
 
@@ -228,7 +171,6 @@ static void detail_click_handler(ClickRecognizerRef recognizer, void *context) {
     }
 
     load_current_card_data();
-    update_card_name_display();
     layer_mark_dirty(s_barcode_layer);
 }
 
@@ -245,26 +187,12 @@ static void detail_config_provider(void *ctx) {
 
 static void detail_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
-    GRect bounds = layer_get_bounds(root);
-
-    // Card name header (black bar at top)
-    s_card_name_layer = text_layer_create(GRect(0, 0, bounds.size.w, 20));
-    text_layer_set_background_color(s_card_name_layer, GColorBlack);
-    text_layer_set_text_color(s_card_name_layer, GColorWhite);
-    text_layer_set_font(s_card_name_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD));
-    text_layer_set_text_alignment(s_card_name_layer, GTextAlignmentCenter);
-    update_card_name_display();
-    layer_add_child(root, text_layer_get_layer(s_card_name_layer));
-
-    // Barcode display area
-    s_barcode_layer = layer_create(GRect(0, 20, bounds.size.w, bounds.size.h - 20));
+    s_barcode_layer = layer_create(layer_get_bounds(root));
     layer_set_update_proc(s_barcode_layer, barcode_update_proc);
     layer_add_child(root, s_barcode_layer);
 }
 
 static void detail_window_unload(Window *window) {
-    text_layer_destroy(s_card_name_layer);
-    s_card_name_layer = NULL;
     layer_destroy(s_barcode_layer);
     s_barcode_layer = NULL;
 }
@@ -413,7 +341,7 @@ static void init(void) {
     app_message_register_inbox_received(inbox_received_handler);
     app_message_register_inbox_dropped(inbox_dropped_callback);
     app_message_register_outbox_failed(outbox_failed_callback);
-    app_message_open(4096, 256);
+    app_message_open(2048, 256);
 
     // Create main window
     s_main_window = window_create();

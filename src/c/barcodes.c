@@ -270,92 +270,89 @@ static void draw_code128_barcode(GContext *ctx, GRect bounds, const char *data) 
 }
 
 // ============================================================================
-// Universal Bit-Matrix Renderer (for pre-rendered barcodes from bwip-js)
-// Handles 1D barcodes (rotated 90 degrees) and 2D codes (centered, scaled)
-// Adapted from Gemini version with improved margins and scaling
+// 2D Code Renderer (QR, Aztec, PDF417)
+// Centers the code on screen with uniform integer scaling.
 // ============================================================================
 
-static void draw_bits_matrix(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
-                             const uint8_t *bits, BarcodeFormat format) {
-    if (w == 0 || h == 0 || !bits) return;
+static void draw_2d_centered(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
+                             const uint8_t *bits) {
+    int screen_w = bounds.size.w;
+    int screen_h = bounds.size.h;
 
-    int sw = bounds.size.w;
-    int sh = bounds.size.h;
-
-    // Auto-detect 1D vs 2D barcode
-    // PDF417 is a stacked 2D code with wide aspect ratio - never rotate it
-    bool is_stacked_2d = (format == FORMAT_PDF417);
-    bool is_1d = !is_stacked_2d && (w > h * 2);
-    bool rotate = is_1d;
-
-    // Setup dimensions based on rotation
-    int p_axis_max = rotate ? sh : sw; // pattern axis (along barcode bars)
-    int b_axis_max = rotate ? sw : sh; // bar length axis
-
-    // Margins: 1D needs quiet zones, 2D needs some breathing room
-    int margin = is_1d ? 6 : 4;
-    int avail_p = p_axis_max - (margin * 2);
-
-    // Scale factor
-    int scale = avail_p / w;
+    int scale_w = screen_w / w;
+    int scale_h = screen_h / h;
+    int scale = (scale_w < scale_h) ? scale_w : scale_h;
     if (scale < 1) scale = 1;
 
-    // Bar length for 1D codes (use most of the perpendicular axis)
-    // For stacked 2D codes (PDF417), stretch height to fill available space
-    int bar_len;
-    int row_scale = scale;
-    if (is_1d) {
-        bar_len = b_axis_max - 20;
-    } else if (is_stacked_2d) {
-        // Scale rows independently to use available vertical space
-        row_scale = (sh - (margin * 2)) / h;
-        if (row_scale < 1) row_scale = 1;
-        bar_len = h * row_scale;
-    } else {
-        bar_len = h * scale;
-    }
+    int barcode_pixel_w = w * scale;
+    int barcode_pixel_h = h * scale;
+    int x_offset = (screen_w - barcode_pixel_w) / 2;
+    int y_offset = (screen_h - barcode_pixel_h) / 2;
 
-    // Centering offsets
-    int pattern_px = w * scale;
-    int p_offset = (p_axis_max - pattern_px) / 2;
-    int b_offset = (b_axis_max - bar_len) / 2;
-
-    // White background
-    graphics_context_set_fill_color(ctx, GColorWhite);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    graphics_context_set_fill_color(ctx, GColorBlack);
-
-    // Render with RLE (group consecutive black pixels into rectangles)
     for (int r = 0; r < (int)h; r++) {
-        int run_start = -1;
         for (int c = 0; c < (int)w; c++) {
             int bit_idx = r * w + c;
-            bool is_active = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
-            if (is_active) {
-                if (run_start == -1) run_start = c;
-            } else {
-                if (run_start != -1) {
-                    int run_w_px = (c - run_start) * scale;
-                    int p_pos = p_offset + run_start * scale;
-                    if (rotate) {
-                        graphics_fill_rect(ctx, GRect(b_offset, p_pos, bar_len, run_w_px), 0, GCornerNone);
-                    } else {
-                        graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * row_scale, run_w_px, row_scale), 0, GCornerNone);
-                    }
-                    run_start = -1;
-                }
+            bool is_black = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
+            if (is_black) {
+                graphics_fill_rect(ctx, GRect(x_offset + c * scale, y_offset + r * scale,
+                                              scale, scale), 0, GCornerNone);
             }
         }
-        // Flush remaining run at end of row
-        if (run_start != -1) {
-            int run_w_px = (w - run_start) * scale;
-            int p_pos = p_offset + run_start * scale;
-            if (rotate) {
-                graphics_fill_rect(ctx, GRect(b_offset, p_pos, bar_len, run_w_px), 0, GCornerNone);
-            } else {
-                graphics_fill_rect(ctx, GRect(p_pos, b_offset + r * row_scale, run_w_px, row_scale), 0, GCornerNone);
+    }
+}
+
+// ============================================================================
+// 1D Code Renderer (Code 128, Code 39, EAN-13)
+// Rotates 90 degrees to use full screen height for bar pattern.
+// Uses INTEGER scaling only — never fractional — to preserve bar width ratios.
+// ============================================================================
+
+static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
+                            const uint8_t *bits) {
+    int screen_w = bounds.size.w;
+    int screen_h = bounds.size.h;
+
+    // Quiet zone margins (6px each end of bar pattern axis)
+    int margin = 6;
+    int available_h = screen_h - (margin * 2);
+
+    // Integer scale only — preserves exact bar width ratios for scannability
+    int scale = available_h / w;
+    if (scale < 1) scale = 1;
+
+    int drawn_h = w * scale;
+    int y_offset = margin + (available_h - drawn_h) / 2;
+    if (y_offset < 0) y_offset = 0;
+
+    // Bar length (horizontal thickness on screen)
+    int bar_len = screen_w - 20;
+    int x_offset = (screen_w - bar_len) / 2;
+
+    // Sample middle row of bitmap (all rows identical for 1D barcodes)
+    int r = h / 2;
+
+    // RLE: group consecutive black modules into single draw calls
+    int run_start = -1;
+    for (int c = 0; c < (int)w; c++) {
+        int bit_idx = r * w + c;
+        bool is_black = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
+
+        if (is_black) {
+            if (run_start == -1) run_start = c;
+        } else {
+            if (run_start != -1) {
+                int run_px = (c - run_start) * scale;
+                int y_pos = y_offset + run_start * scale;
+                graphics_fill_rect(ctx, GRect(x_offset, y_pos, bar_len, run_px), 0, GCornerNone);
+                run_start = -1;
             }
         }
+    }
+    // Flush last run
+    if (run_start != -1) {
+        int run_px = (w - run_start) * scale;
+        int y_pos = y_offset + run_start * scale;
+        graphics_fill_rect(ctx, GRect(x_offset, y_pos, bar_len, run_px), 0, GCornerNone);
     }
 }
 
@@ -406,8 +403,21 @@ void barcode_draw(GContext *ctx, GRect bounds, BarcodeFormat format,
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
     if (width > 0 && height > 0 && bits) {
-        // Pre-rendered binary data from bwip-js - use universal renderer
-        draw_bits_matrix(ctx, bounds, width, height, bits, format);
+        // Pre-rendered binary data from bwip-js
+        graphics_context_set_fill_color(ctx, GColorBlack);
+        switch (format) {
+            case FORMAT_CODE128:
+            case FORMAT_CODE39:
+            case FORMAT_EAN13:
+                draw_1d_rotated(ctx, bounds, width, height, bits);
+                break;
+            case FORMAT_QR:
+            case FORMAT_AZTEC:
+            case FORMAT_PDF417:
+            default:
+                draw_2d_centered(ctx, bounds, width, height, bits);
+                break;
+        }
         return;
     }
 
