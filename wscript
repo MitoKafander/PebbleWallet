@@ -20,8 +20,8 @@ def build(ctx):
         ctx.set_group(ctx.env.PLATFORM_NAME)
 
         app_elf = '{}/pebble-app.elf'.format(ctx.env.BUILD_DIR)
-        ctx.pbl_program(source=ctx.path.ant_glob('src/c/**/*.c'),
-                        includes=['src/c'],
+        ctx.pbl_program(source=ctx.path.ant_glob('src/**/*.c'),
+                        includes=['src'],
                         target=app_elf)
 
         # IMPORTANT: binaries must be list of dicts with 'platform' and 'app_elf' keys
