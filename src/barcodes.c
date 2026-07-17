@@ -289,11 +289,14 @@ static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int screen_w = bounds.size.w;
     int screen_h = bounds.size.h;
 
-    // Drawable area = screen minus a small quiet-zone margin. On round displays
-    // shrink to the inscribed square (~70%) so corners stay on-glass.
-    int QZ = 4;
-    int avail_w = screen_w - 2 * QZ;
-    int avail_h = screen_h - 2 * QZ;
+    // Use the FULL screen for the scale calc: integer flooring never divides
+    // evenly for standard 2D-code sizes, so it already leaves a centered
+    // quiet-zone margin. Subtracting an extra margin here would drop the integer
+    // scale by a whole step for common module counts (e.g. a 23-module Aztec:
+    // floor(144/23)=6 -> 138px, but floor(136/23)=5 -> only 115px). On round
+    // displays shrink to the inscribed square (~70%) so corners stay on-glass.
+    int avail_w = screen_w;
+    int avail_h = screen_h;
 #if defined(PBL_ROUND)
     avail_w = (screen_w * 70) / 100;
     avail_h = (screen_h * 70) / 100;
@@ -322,6 +325,61 @@ static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
             int mcy = rotate ? c : r;                  // grid row after rotation
             graphics_fill_rect(ctx, GRect(ox + mcx * scale, oy + mcy * scale,
                                           scale, scale), 0, GCornerNone);
+        }
+    }
+}
+
+// ============================================================================
+// PDF417 Renderer — fills the screen (proportional). Unlike QR/Aztec, PDF417
+// does NOT need square modules: its rows are meant to be taller than the module
+// width, so stretching to fill looks bigger and still scans. Wide symbols are
+// rotated 90 degrees onto the taller axis. (This is the v2.3.2 rendering that
+// worked well for PDF417.)
+// ============================================================================
+
+static void draw_pdf417(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
+                        const uint8_t *bits, int max_bytes) {
+    if (w == 0 || h == 0) return;
+
+    int screen_w = bounds.size.w;
+    int screen_h = bounds.size.h;
+    int QZ = 4;
+    int avail_w = screen_w - 2 * QZ;
+    int avail_h = screen_h - 2 * QZ;
+
+    // Rotate if it makes the symbol bigger (wide PDF417 -> down the tall axis).
+    int m_upright = imin((avail_w * 1000) / (int)w, (avail_h * 1000) / (int)h);
+    int m_rot     = imin((avail_w * 1000) / (int)h, (avail_h * 1000) / (int)w);
+    bool rotate = m_rot > m_upright;
+
+    int dx = rotate ? (int)h : (int)w;   // modules across screen-x
+    int dy = rotate ? (int)w : (int)h;   // modules down screen-y
+
+    // Fill the limiting dimension; the other axis stretches to match.
+    int drawn_x, drawn_y;
+    if (avail_w * dy <= avail_h * dx) {
+        drawn_x = avail_w;
+        drawn_y = (avail_w * dy) / dx;
+    } else {
+        drawn_y = avail_h;
+        drawn_x = (avail_h * dx) / dy;
+    }
+    int ox = (screen_w - drawn_x) / 2;
+    int oy = (screen_h - drawn_y) / 2;
+
+    for (int r = 0; r < (int)h; r++) {
+        for (int c = 0; c < (int)w; c++) {
+            int bit_idx = r * (int)w + c;
+            if ((bit_idx >> 3) >= max_bytes) continue;
+            if (!(bits[bit_idx >> 3] & (1 << (7 - (bit_idx & 7))))) continue;
+
+            int mcx = rotate ? ((int)h - 1 - r) : c;
+            int mcy = rotate ? c : r;
+            int x0 = ox + (mcx * drawn_x) / dx;
+            int x1 = ox + ((mcx + 1) * drawn_x) / dx;
+            int y0 = oy + (mcy * drawn_y) / dy;
+            int y1 = oy + ((mcy + 1) * drawn_y) / dy;
+            graphics_fill_rect(ctx, GRect(x0, y0, x1 - x0, y1 - y0), 0, GCornerNone);
         }
     }
 }
@@ -434,10 +492,14 @@ void barcode_draw(GContext *ctx, GRect bounds, BarcodeFormat format,
             case FORMAT_EAN13:
                 draw_1d_rotated(ctx, bounds, width, height, bits);
                 break;
+            case FORMAT_PDF417:
+                // Wide code, non-square modules OK — fill/stretch to the screen.
+                draw_pdf417(ctx, bounds, width, height, bits, MAX_BITS_LEN);
+                break;
             case FORMAT_QR:
             case FORMAT_AZTEC:
-            case FORMAT_PDF417:
             default:
+                // Square modules required to scan — uniform integer, full-screen.
                 draw_2d(ctx, bounds, width, height, bits, MAX_BITS_LEN);
                 break;
         }
