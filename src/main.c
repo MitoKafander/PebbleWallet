@@ -256,7 +256,6 @@ static void detail_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void detail_back_handler(ClickRecognizerRef recognizer, void *context) {
-    light_enable(false);
     window_stack_pop(true);
 }
 
@@ -294,9 +293,6 @@ static void show_detail_window(int index) {
     }
 
     window_stack_push(s_detail_window, true);
-
-    // High brightness for barcode scanning
-    light_enable(true);
 }
 
 // ============================================================================
