@@ -112,55 +112,56 @@ function generateMatrixData(text, formatId) {
     if (!fmt) { reject('Unknown format'); return; }
 
     try {
-      var options = {
-        bcid: fmt.bwip,
-        text: text,
-        scale: 1,
-        includetext: false,
-        paddingwidth: 0,
-        paddingheight: 0
-      };
-
-      // Format-specific options
-      if (formatId == 5) {
-        // PDF417: pick column count from data length so long boarding-pass
-        // payloads stay a scannable shape instead of a tall 2-column strip.
-        var len = (text || '').length;
-        options.columns = len <= 40 ? 2 : len <= 90 ? 3 : len <= 150 ? 4 : 5;
-        options.eclevel = 1;
-        // rowmult = row height as a multiple of module width (bwip-js default 3).
-        // 2 keeps the matrix ~1/3 shorter so a full boarding pass fits the watch's
-        // 1400-byte buffer, while staying tall enough for 2D imagers to read.
-        options.rowmult = 2;
-      }
-      else if (formatId < 3) { options.height = 10; } // 1D barcodes
-
-      bwipjs.toCanvas(canvas, options);
-
-      var w = canvas.width, h = canvas.height;
-      var pixels = canvas.getContext('2d').getImageData(0, 0, w, h).data;
-      var hex = '', val = 0, bitCount = 0;
-
-      for (var r = 0; r < h; r++) {
-        for (var c = 0; c < w; c++) {
-          var idx = (r * w + c) * 4;
-          var isBlack = (pixels[idx + 3] > 128) && (pixels[idx] < 128);
-          val = (val << 1) | (isBlack ? 1 : 0);
-          if (++bitCount == 4) {
-            hex += val.toString(16).toUpperCase();
-            val = 0; bitCount = 0;
+      // Pack a bit-grid (row-major, values truthy=black) into "w,h,hex".
+      // Bits are MSB-first and byte-aligned to match the watch's C reader.
+      function packGrid(getBlack, w, h) {
+        var hex = '', val = 0, bitCount = 0;
+        for (var r = 0; r < h; r++) {
+          for (var c = 0; c < w; c++) {
+            val = (val << 1) | (getBlack(r, c) ? 1 : 0);
+            if (++bitCount == 4) { hex += val.toString(16).toUpperCase(); val = 0; bitCount = 0; }
           }
         }
+        if (bitCount > 0) { val = val << (4 - bitCount); hex += val.toString(16).toUpperCase(); }
+        if (hex.length % 2) hex += '0';
+        return w + ',' + h + ',' + hex;
       }
-      if (bitCount > 0) {
-        val = val << (4 - bitCount);
-        hex += val.toString(16).toUpperCase();
-      }
-      // Byte-align: the watch/phone re-parse this hex 2 chars (1 byte) at a time,
-      // so an odd nibble count would misread the final <=4 modules. Pad low nibble.
-      if (hex.length % 2) hex += '0';
 
-      resolve(w + ',' + h + ',' + hex);
+      // 2D codes (QR / Aztec / PDF417): use bwip-js raw() to get the TRUE module
+      // matrix. toCanvas over-samples Aztec 2x, which made codes render small and
+      // dense on the watch; raw() gives 1 cell per module -> bigger, scannable.
+      if (formatId >= 3 && typeof bwipjs.raw === 'function') {
+        var rawOpts = { bcid: fmt.bwip, text: text };
+        if (formatId == 5) { // PDF417: column count from data length (cap at 4 so it fits 144px)
+          var plen = (text || '').length;
+          rawOpts.columns = plen <= 40 ? 2 : plen <= 90 ? 3 : 4;
+          rawOpts.eclevel = 1;
+        }
+        var sym = bwipjs.raw(rawOpts)[0];
+        var pw = sym.pixx, ph = sym.pixy, pixs = sym.pixs;
+        resolve(packGrid(function(r, c) { return pixs[r * pw + c]; }, pw, ph));
+        return;
+      }
+
+      // 1D codes (and fallback if raw() is unavailable): render to canvas.
+      var options = {
+        bcid: fmt.bwip, text: text, scale: 1,
+        includetext: false, paddingwidth: 0, paddingheight: 0
+      };
+      if (formatId < 3) { options.height = 10; }
+      else if (formatId == 5) {
+        var len = (text || '').length;
+        options.columns = len <= 40 ? 2 : len <= 90 ? 3 : 4;
+        options.eclevel = 1;
+      }
+
+      bwipjs.toCanvas(canvas, options);
+      var w = canvas.width, h = canvas.height;
+      var pixels = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+      resolve(packGrid(function(r, c) {
+        var idx = (r * w + c) * 4;
+        return (pixels[idx + 3] > 128) && (pixels[idx] < 128);
+      }, w, h));
     } catch (e) {
       reject(e);
     }

@@ -330,11 +330,11 @@ static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
 }
 
 // ============================================================================
-// PDF417 Renderer — fills the screen (proportional). Unlike QR/Aztec, PDF417
-// does NOT need square modules: its rows are meant to be taller than the module
-// width, so stretching to fill looks bigger and still scans. Wide symbols are
-// rotated 90 degrees onto the taller axis. (This is the v2.3.2 rendering that
-// worked well for PDF417.)
+// PDF417 Renderer. The CODEWORD (width) axis must have uniform module widths to
+// scan, so it uses an integer module width. The ROW (height) axis is stretched
+// to fill the screen — PDF417 rows are meant to be much taller than a module,
+// so tall rows are correct and give a big, scannable target. Verified to decode
+// end-to-end (zxing) before shipping.
 // ============================================================================
 
 static void draw_pdf417(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
@@ -343,43 +343,27 @@ static void draw_pdf417(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
 
     int screen_w = bounds.size.w;
     int screen_h = bounds.size.h;
-    int QZ = 4;
-    int avail_w = screen_w - 2 * QZ;
-    int avail_h = screen_h - 2 * QZ;
 
-    // Rotate if it makes the symbol bigger (wide PDF417 -> down the tall axis).
-    int m_upright = imin((avail_w * 1000) / (int)w, (avail_h * 1000) / (int)h);
-    int m_rot     = imin((avail_w * 1000) / (int)h, (avail_h * 1000) / (int)w);
-    bool rotate = m_rot > m_upright;
+    // Uniform integer module width across the codeword axis.
+    int mod_w = screen_w / (int)w;
+    if (mod_w < 1) mod_w = 1;               // very wide symbols draw at 1px, may clip
+    int drawn_w = mod_w * (int)w;
+    int ox = (screen_w - drawn_w) / 2;
 
-    int dx = rotate ? (int)h : (int)w;   // modules across screen-x
-    int dy = rotate ? (int)w : (int)h;   // modules down screen-y
-
-    // Fill the limiting dimension; the other axis stretches to match.
-    int drawn_x, drawn_y;
-    if (avail_w * dy <= avail_h * dx) {
-        drawn_x = avail_w;
-        drawn_y = (avail_w * dy) / dx;
-    } else {
-        drawn_y = avail_h;
-        drawn_x = (avail_h * dx) / dy;
-    }
-    int ox = (screen_w - drawn_x) / 2;
-    int oy = (screen_h - drawn_y) / 2;
+    // Rows stretched to fill the height with clean integer boundaries.
+    int top = 2;
+    int avail_h = screen_h - 2 * top;
 
     for (int r = 0; r < (int)h; r++) {
+        int y0 = top + (r * avail_h) / (int)h;
+        int y1 = top + ((r + 1) * avail_h) / (int)h;
+        int rh = y1 - y0;
+        if (rh < 1) rh = 1;
         for (int c = 0; c < (int)w; c++) {
             int bit_idx = r * (int)w + c;
             if ((bit_idx >> 3) >= max_bytes) continue;
             if (!(bits[bit_idx >> 3] & (1 << (7 - (bit_idx & 7))))) continue;
-
-            int mcx = rotate ? ((int)h - 1 - r) : c;
-            int mcy = rotate ? c : r;
-            int x0 = ox + (mcx * drawn_x) / dx;
-            int x1 = ox + ((mcx + 1) * drawn_x) / dx;
-            int y0 = oy + (mcy * drawn_y) / dy;
-            int y1 = oy + ((mcy + 1) * drawn_y) / dy;
-            graphics_fill_rect(ctx, GRect(x0, y0, x1 - x0, y1 - y0), 0, GCornerNone);
+            graphics_fill_rect(ctx, GRect(ox + c * mod_w, y0, mod_w, rh), 0, GCornerNone);
         }
     }
 }
