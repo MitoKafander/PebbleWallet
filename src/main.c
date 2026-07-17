@@ -197,10 +197,29 @@ static void outbox_failed_callback(DictionaryIterator *iterator, AppMessageResul
 // Detail Window (Barcode Display)
 // ============================================================================
 
+#define DETAIL_NAME_H 22   // top strip showing the card name
+
 static void barcode_update_proc(Layer *layer, GContext *ctx) {
+    GRect bounds = layer_get_bounds(layer);
+
+    // White background for the whole screen (incl. the name strip).
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
     if (s_current_index >= 0 && s_current_index < g_card_count) {
         WalletCardInfo *info = &g_cards[s_current_index];
-        barcode_draw(ctx, layer_get_bounds(layer), info->format,
+
+        // Card name at the top (so you can tell which card you're on while
+        // cycling with up/down), barcode fills the area below it.
+        graphics_context_set_text_color(ctx, GColorBlack);
+        graphics_draw_text(ctx, info->name,
+            fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+            GRect(2, -1, bounds.size.w - 4, DETAIL_NAME_H),
+            GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+
+        GRect code_bounds = GRect(bounds.origin.x, bounds.origin.y + DETAIL_NAME_H,
+                                  bounds.size.w, bounds.size.h - DETAIL_NAME_H);
+        barcode_draw(ctx, code_bounds, info->format,
                      info->width, info->height, g_active_bits);
     }
 }

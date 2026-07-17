@@ -379,22 +379,18 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int screen_w = bounds.size.w;
     int screen_h = bounds.size.h;
 
-    // Quiet zone margins (6px each end of bar pattern axis)
-    int margin = 6;
+    // Quiet zone margins (8px each end of the bar-pattern axis). 1D scanners
+    // need white space before/after the bars, so keep a real margin rather than
+    // filling edge-to-edge. Codes too long to fit at 1px with this margin simply
+    // can't be shown scannably at this size — use a denser symbology (Code 128).
+    int margin = 8;
     int available_h = screen_h - (margin * 2);
-
-    // Long low-density codes (e.g. Code 39) can exceed the margined area. Reclaim
-    // the quiet-zone margin to fit up to the full screen height before clipping.
-    if ((int)w > available_h) {
-        margin = 0;
-        available_h = screen_h;
-    }
 
     // UNIFORM integer scale — every module is exactly `scale` px so the exact
     // bar-width RATIOS are preserved. This is required to scan; fractional
     // scaling makes adjacent bars uneven and the code won't decode.
     int scale = available_h / (int)w;
-    if (scale < 1) scale = 1;   // still-longer codes render at 1px and may clip
+    if (scale < 1) scale = 1;   // longer codes render at 1px and may clip
     int drawn_h = (int)w * scale;
     int y_offset = margin + (available_h - drawn_h) / 2;
 
