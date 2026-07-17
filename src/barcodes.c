@@ -350,24 +350,17 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int margin = 6;
     int available_h = screen_h - (margin * 2);
 
-    // If the barcode has more modules than the screen has pixels, it cannot be
-    // drawn at >=1px per module — squeezing it would merge bars into an
-    // unscannable smear. Be honest: tell the user instead of showing a broken code.
-    if ((int)w > available_h) {
-        graphics_context_set_text_color(ctx, GColorBlack);
-        graphics_draw_text(ctx, "Barcode too long\nfor this screen",
-            fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), bounds,
-            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
-        return;
-    }
-
-    // Integer scale only — preserves exact bar width ratios for scannability
-    int scale = available_h / w;
-    if (scale < 1) scale = 1;
-
-    int drawn_h = w * scale;
-    int y_offset = margin + (available_h - drawn_h) / 2;
-    if (y_offset < 0) y_offset = 0;
+    // Two fit modes:
+    //  - Fits (w <= available_h): integer scale, exact crisp bar-width ratios.
+    //  - Too many modules: proportional fit — map each module boundary to a
+    //    fractional position so the WHOLE code always shows (compressed) with
+    //    proportionally-correct bar/space widths, instead of clipping or refusing.
+    bool fits = ((int)w <= available_h);
+    int scale = fits ? (available_h / (int)w) : 0;
+    if (fits && scale < 1) scale = 1;
+    int drawn_h = fits ? ((int)w * scale) : available_h;
+    int y_base = margin + (available_h - drawn_h) / 2;
+    if (y_base < margin) y_base = margin;
 
     // Bar length (horizontal thickness on screen)
     int bar_len = screen_w - 20;
@@ -376,29 +369,28 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     // Sample middle row of bitmap (all rows identical for 1D barcodes)
     int r = h / 2;
 
-    // RLE: group consecutive black modules into single draw calls
+    // RLE: group consecutive black modules into single draw calls. Run edges are
+    // positioned by pos(c) so both modes share one path (integer or proportional).
     int run_start = -1;
-    for (int c = 0; c < (int)w; c++) {
-        int bit_idx = r * w + c;
-        if ((bit_idx >> 3) >= MAX_BITS_LEN) break;   // never read past buffer
-        bool is_black = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
+    int limit = (int)w + 1;  // one extra step to flush a trailing run
+    for (int c = 0; c < limit; c++) {
+        bool is_black = false;
+        if (c < (int)w) {
+            int bit_idx = r * (int)w + c;
+            if ((bit_idx >> 3) >= MAX_BITS_LEN) break;   // never read past buffer
+            is_black = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
+        }
 
         if (is_black) {
             if (run_start == -1) run_start = c;
-        } else {
-            if (run_start != -1) {
-                int run_px = (c - run_start) * scale;
-                int y_pos = y_offset + run_start * scale;
-                graphics_fill_rect(ctx, GRect(x_offset, y_pos, bar_len, run_px), 0, GCornerNone);
-                run_start = -1;
-            }
+        } else if (run_start != -1) {
+            int y0 = y_base + (fits ? run_start * scale : (run_start * available_h) / (int)w);
+            int y1 = y_base + (fits ? c * scale : (c * available_h) / (int)w);
+            int rh = y1 - y0;
+            if (rh < 1) rh = 1;  // keep every bar visible even when compressed
+            graphics_fill_rect(ctx, GRect(x_offset, y0, bar_len, rh), 0, GCornerNone);
+            run_start = -1;
         }
-    }
-    // Flush last run
-    if (run_start != -1) {
-        int run_px = (w - run_start) * scale;
-        int y_pos = y_offset + run_start * scale;
-        graphics_fill_rect(ctx, GRect(x_offset, y_pos, bar_len, run_px), 0, GCornerNone);
     }
 }
 
