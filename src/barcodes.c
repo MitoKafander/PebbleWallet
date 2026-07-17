@@ -271,11 +271,15 @@ static void draw_code128_barcode(GContext *ctx, GRect bounds, const char *data) 
 
 // ============================================================================
 // 2D Code Renderer (QR, Aztec, PDF417)
-// Centers the code on screen with uniform integer scaling. Wide codes (PDF417
-// boarding passes) are auto-rotated 90 degrees so the long axis runs down the
-// taller screen dimension — this yields much bigger, more scannable modules.
+// Fills as much of the screen as possible using PROPORTIONAL module boundaries
+// (not integer scaling) so codes are as large as the display allows while a
+// small white quiet zone remains. Modules end up 5px/6px etc. — camera scanners
+// read the grid fine, and the code is noticeably bigger than integer scaling.
+// Wide codes (PDF417) auto-rotate 90 degrees onto the taller axis.
 // `max_bytes` guards against reading past the pixel buffer.
 // ============================================================================
+
+static int imin(int a, int b) { return a < b ? a : b; }
 
 static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
                     const uint8_t *bits, int max_bytes) {
@@ -284,36 +288,38 @@ static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int screen_w = bounds.size.w;
     int screen_h = bounds.size.h;
 
-    // Area used to compute scale. On round displays shrink to the inscribed
-    // square (~70%) so a 2D code's corners (QR finder patterns) stay on-glass;
-    // the code is still centered within the FULL bounds below.
-    int avail_w = screen_w;
-    int avail_h = screen_h;
+    // Drawable area = screen minus a small quiet-zone margin. On round displays
+    // shrink to the inscribed square (~70%) so corners stay on-glass.
+    int QZ = 5;
+    int avail_w = screen_w - 2 * QZ;
+    int avail_h = screen_h - 2 * QZ;
 #if defined(PBL_ROUND)
     avail_w = (screen_w * 70) / 100;
     avail_h = (screen_h * 70) / 100;
 #endif
 
-    // Compare integer scale with and without a 90-degree rotation; pick whichever
-    // makes the modules bigger. Square codes (QR/Aztec) stay upright.
-    int scale_upright = avail_w / w;
-    int s2 = avail_h / h;
-    if (s2 < scale_upright) scale_upright = s2;
+    // Pick orientation (upright vs rotated 90) that yields the larger module
+    // size. Compare in fixed-point (x1000) to avoid floats. Square codes tie and
+    // stay upright.
+    int m_upright = imin((avail_w * 1000) / (int)w, (avail_h * 1000) / (int)h);
+    int m_rot     = imin((avail_w * 1000) / (int)h, (avail_h * 1000) / (int)w);
+    bool rotate = m_rot > m_upright;
 
-    int scale_rot = avail_w / h;
-    int s3 = avail_h / w;
-    if (s3 < scale_rot) scale_rot = s3;
+    int dx = rotate ? (int)h : (int)w;   // modules across screen-x
+    int dy = rotate ? (int)w : (int)h;   // modules down screen-y
 
-    bool rotate = scale_rot > scale_upright;
-    int scale = rotate ? scale_rot : scale_upright;
-    if (scale < 1) scale = 1;
-
-    // On-screen module extent (dx across, dy down) after optional rotation,
-    // centered within the full screen bounds.
-    int dx = rotate ? (int)h : (int)w;
-    int dy = rotate ? (int)w : (int)h;
-    int x_offset = (screen_w - dx * scale) / 2;
-    int y_offset = (screen_h - dy * scale) / 2;
+    // Largest drawn rectangle that keeps modules square and fits the drawable
+    // area (preserve aspect: drawn_x/dx == drawn_y/dy).
+    int drawn_x, drawn_y;
+    if (avail_w * dy <= avail_h * dx) {           // width-limited
+        drawn_x = avail_w;
+        drawn_y = (avail_w * dy) / dx;
+    } else {                                       // height-limited
+        drawn_y = avail_h;
+        drawn_x = (avail_h * dx) / dy;
+    }
+    int ox = (screen_w - drawn_x) / 2;
+    int oy = (screen_h - drawn_y) / 2;
 
     for (int r = 0; r < (int)h; r++) {
         for (int c = 0; c < (int)w; c++) {
@@ -321,16 +327,17 @@ static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
             if ((bit_idx >> 3) >= max_bytes) continue;   // never read past buffer
             if (!(bits[bit_idx >> 3] & (1 << (7 - (bit_idx & 7))))) continue;
 
-            int sx, sy;
-            if (rotate) {
-                // 90 deg clockwise: matrix (r,c) -> screen ((h-1-r), c)
-                sx = x_offset + ((int)h - 1 - r) * scale;
-                sy = y_offset + c * scale;
-            } else {
-                sx = x_offset + c * scale;
-                sy = y_offset + r * scale;
-            }
-            graphics_fill_rect(ctx, GRect(sx, sy, scale, scale), 0, GCornerNone);
+            // Module coords in the (dx across, dy down) grid after optional rotation.
+            int mcx = rotate ? ((int)h - 1 - r) : c;
+            int mcy = rotate ? c : r;
+
+            // Proportional boundaries → adjacent modules tile with no gaps.
+            int x0 = ox + (mcx * drawn_x) / dx;
+            int x1 = ox + ((mcx + 1) * drawn_x) / dx;
+            int y0 = oy + (mcy * drawn_y) / dy;
+            int y1 = oy + ((mcy + 1) * drawn_y) / dy;
+
+            graphics_fill_rect(ctx, GRect(x0, y0, x1 - x0, y1 - y0), 0, GCornerNone);
         }
     }
 }
@@ -362,8 +369,10 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int y_base = margin + (available_h - drawn_h) / 2;
     if (y_base < margin) y_base = margin;
 
-    // Bar length (horizontal thickness on screen)
-    int bar_len = screen_w - 20;
+    // Bar length across the screen. 1D codes need a quiet zone only at the two
+    // ENDS of the bar pattern (the module axis), not along the bar length — so
+    // make bars nearly full-width for a bigger, easier-to-scan target.
+    int bar_len = screen_w - 8;
     int x_offset = (screen_w - bar_len) / 2;
 
     // Sample middle row of bitmap (all rows identical for 1D barcodes)
