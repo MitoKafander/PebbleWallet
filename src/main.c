@@ -38,6 +38,7 @@ static int s_rx_received = 0;  // bytes reassembled so far
 
 // Forward declarations
 static void request_cards_from_phone(void *data);
+static void load_current_card_data(void);
 
 // ============================================================================
 // Demo Cards (fallback when no phone and no persisted cards)
