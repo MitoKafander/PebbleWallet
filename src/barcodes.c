@@ -383,11 +383,18 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int margin = 6;
     int available_h = screen_h - (margin * 2);
 
+    // Long low-density codes (e.g. Code 39) can exceed the margined area. Reclaim
+    // the quiet-zone margin to fit up to the full screen height before clipping.
+    if ((int)w > available_h) {
+        margin = 0;
+        available_h = screen_h;
+    }
+
     // UNIFORM integer scale — every module is exactly `scale` px so the exact
     // bar-width RATIOS are preserved. This is required to scan; fractional
     // scaling makes adjacent bars uneven and the code won't decode.
     int scale = available_h / (int)w;
-    if (scale < 1) scale = 1;   // very long codes render at 1px and may clip
+    if (scale < 1) scale = 1;   // still-longer codes render at 1px and may clip
     int drawn_h = (int)w * scale;
     int y_offset = margin + (available_h - drawn_h) / 2;
 

@@ -158,6 +158,17 @@ function generateMatrixData(text, formatId) {
       bwipjs.toCanvas(canvas, options);
       var w = canvas.width, h = canvas.height;
       var pixels = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+      if (formatId < 3) {
+        // 1D barcode: every row is identical, and the watch samples only the
+        // middle row — so store a SINGLE row. Saves ~30x storage (the full bar
+        // height was bloating the ~4KB watch budget and blocking card syncs).
+        var mid = h >> 1;
+        resolve(packGrid(function(r, c) {
+          var idx = (mid * w + c) * 4;
+          return (pixels[idx + 3] > 128) && (pixels[idx] < 128);
+        }, w, 1));
+        return;
+      }
       resolve(packGrid(function(r, c) {
         var idx = (r * w + c) * 4;
         return (pixels[idx + 3] > 128) && (pixels[idx] < 128);
@@ -281,20 +292,22 @@ function saveAndClose() {
 
   var promises = [];
   cards.forEach(function(card, i) {
-    var inputText = card.text || card.data || '';
+    // Prefer the ORIGINAL text. (card.data holds a "w,h,hex" matrix, never text.)
+    var inputText = card.text || '';
+    // Back-compat: a legacy card may have raw text in .data (no comma = not a matrix).
+    if (!inputText && card.data && card.data.indexOf(',') === -1) inputText = card.data;
     if (!card.name || !inputText) return;
 
-    // Only re-encode if not already pre-rendered
-    if (!card.data || card.data.indexOf(',') === -1) {
-      var p = generateMatrixData(inputText, card.format || 0).then(function(matrixData) {
-        card.text = inputText;
-        card.data = matrixData;
-      }).catch(function(e) {
-        alert('Error encoding "' + card.name + '": ' + e);
-        throw e;
-      });
-      promises.push(p);
-    }
+    // ALWAYS re-encode from the original text so encoder improvements (e.g. the
+    // true-resolution raw() path) get applied to existing cards on every save.
+    var p = generateMatrixData(inputText, card.format || 0).then(function(matrixData) {
+      card.text = inputText;
+      card.data = matrixData;
+    }).catch(function(e) {
+      alert('Error encoding "' + card.name + '": ' + e);
+      throw e;
+    });
+    promises.push(p);
   });
 
   Promise.all(promises).then(function() {

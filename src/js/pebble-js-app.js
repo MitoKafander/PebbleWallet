@@ -6,6 +6,9 @@
  */
 
 var CONFIG_URL = 'https://mitokafander.github.io/PebbleWallet/config/';
+// Bump on every release so the phone webview loads the latest config page
+// instead of a cached copy (the config page holds the barcode encoder).
+var CONFIG_VERSION = '2.3.6';
 
 function loadCards() {
     try {
@@ -210,7 +213,7 @@ Pebble.addEventListener('appmessage', function(event) {
 
 Pebble.addEventListener('showConfiguration', function() {
     var cards = loadCards();
-    var url = CONFIG_URL + '#' + encodeURIComponent(JSON.stringify(cards));
+    var url = CONFIG_URL + '?v=' + CONFIG_VERSION + '#' + encodeURIComponent(JSON.stringify(cards));
     console.log('Opening config page');
     Pebble.openURL(url);
 });
