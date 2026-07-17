@@ -18,10 +18,18 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 .card-preview .error { color: #ff3b30; font-size: 12px; }
 .card-preview .ok { color: #34c759; font-size: 12px; }
 .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
-.btn-delete { background: #ff3b30; color: white; margin-left: 5px; }
+.btn-delete { background: #ff3b30; color: white; }
 .btn-edit { background: #ff9500; color: white; }
+.btn-move { background: #8e8e93; color: white; padding: 8px 10px; font-weight: bold; }
+.btn-move:disabled { opacity: 0.35; cursor: default; }
+.card-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .btn-primary { background: #007aff; color: white; width: 100%; padding: 15px; font-size: 16px; }
 .btn-save { background: #34c759; color: white; width: 100%; padding: 15px; font-size: 16px; margin-top: 20px; }
+.btn-scan { background: #5856d6; color: white; width: 100%; padding: 14px; font-size: 16px; }
+.scan-status { font-size: 13px; margin-top: 8px; min-height: 16px; color: #666; }
+.scan-status.ok { color: #34c759; }
+.scan-status.err { color: #ff3b30; }
+.hint { font-size: 12px; color: #999; margin: -8px 0 12px; }
 .form-group { margin-bottom: 15px; }
 .form-group label { display: block; margin-bottom: 5px; font-weight: 500; color: #333; }
 .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
@@ -44,6 +52,11 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 
 <h2>Add New Card</h2>
 <div class="section">
+  <div class="form-group">
+    <button type="button" class="btn btn-scan" id="scanBtn" onclick="startScan()">📷 Scan a card with your camera</button>
+    <input type="file" id="scanInput" accept="image/*" capture="environment" style="display:none" onchange="handleScanFile(event)">
+    <div id="scanStatus" class="scan-status">Point your camera at a barcode or QR code to fill the fields automatically.</div>
+  </div>
   <div class="form-group">
     <label for="cardName">Card Name</label>
     <input type="text" id="cardName" placeholder="e.g., Starbucks, Target" maxlength="31">
@@ -207,7 +220,7 @@ function renderCards() {
     return;
   }
 
-  var html = '';
+  var html = '<div class="hint">Order = order on the watch. The top card is the one it opens to. Use ▲ ▼ to reorder.</div>';
   cards.forEach(function(card, i) {
     var displayData = card.text || card.data || '';
     // Don't show raw hex matrix data
@@ -220,8 +233,12 @@ function renderCards() {
     html += '<div class="card">'
       + '<div class="card-header">'
       + '<span class="card-name">' + escapeHtml(card.name) + '</span>'
+      + '<div class="card-actions">'
+      + '<button class="btn btn-move" onclick="moveCard(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + '>▲</button>'
+      + '<button class="btn btn-move" onclick="moveCard(' + i + ',1)"' + (i === cards.length - 1 ? ' disabled' : '') + '>▼</button>'
       + '<button class="btn btn-edit" onclick="editCard(' + i + ')">Edit</button>'
       + '<button class="btn btn-delete" onclick="deleteCard(' + i + ')">Delete</button>'
+      + '</div>'
       + '</div>'
       + (card.description ? '<div class="card-data" style="color:#333;margin-bottom:4px">' + escapeHtml(card.description) + '</div>' : '')
       + '<div class="card-data">' + escapeHtml(displayData) + '</div>'
@@ -301,6 +318,77 @@ function deleteCard(index) {
     cards.splice(index, 1);
     renderCards();
   }
+}
+
+// Reorder a card up (-1) or down (+1). Order here IS the order on the watch,
+// and the first card is the one the watch opens to on launch.
+function moveCard(index, dir) {
+  var j = index + dir;
+  if (j < 0 || j >= cards.length) return;
+  var tmp = cards[index]; cards[index] = cards[j]; cards[j] = tmp;
+  renderCards();
+}
+
+// --- Camera scan ---------------------------------------------------------
+// Snap a photo of a physical card and decode it with zxing-wasm, then fill the
+// data + format fields. Uses the native camera picker (file input w/ capture),
+// which webviews allow without the getUserMedia permission dance. The decoder
+// is loaded on demand from a CDN, so scanning needs an internet connection.
+
+// zxing-wasm format string -> our format id (see FORMATS above).
+var ZXING_FORMAT_MAP = {
+  'Code128': 0, 'Code39': 1, 'Code93': 0,
+  'EAN-13': 2, 'EAN-8': 2, 'UPC-A': 0, 'UPC-E': 0,
+  'QRCode': 3, 'MicroQRCode': 3, 'Aztec': 4, 'PDF417': 5
+};
+
+var _zxing = null;
+function loadZxing() {
+  if (_zxing) return Promise.resolve(_zxing);
+  // esm.sh resolves the .wasm automatically; jsdelivr's +esm is the fallback.
+  return import('https://esm.sh/zxing-wasm@2/reader')
+    .catch(function() { return import('https://cdn.jsdelivr.net/npm/zxing-wasm@2/reader/+esm'); })
+    .then(function(mod) { _zxing = mod; return mod; });
+}
+
+function startScan() {
+  document.getElementById('scanInput').click();
+}
+
+function handleScanFile(ev) {
+  var file = ev.target.files && ev.target.files[0];
+  ev.target.value = '';   // allow re-picking the same file
+  if (!file) return;
+  var status = document.getElementById('scanStatus');
+  status.className = 'scan-status';
+  status.textContent = 'Reading barcode…';
+
+  loadZxing().then(function(mod) {
+    return mod.readBarcodes(file, { tryHarder: true, maxNumberOfSymbols: 1 });
+  }).then(function(results) {
+    if (!results || !results.length || !results[0].text) {
+      status.className = 'scan-status err';
+      status.textContent = 'No code found. Fill the frame with the barcode, hold steady, and try again.';
+      return;
+    }
+    var r = results[0];
+    document.getElementById('cardData').value = r.text;
+    var fmtId = ZXING_FORMAT_MAP[r.format];
+    if (fmtId !== undefined) {
+      document.getElementById('cardFormat').value = fmtId;
+      status.className = 'scan-status ok';
+      status.textContent = '✓ Scanned ' + r.format + '. Give it a name, then tap Add Card.';
+    } else {
+      document.getElementById('cardFormat').value = 0;   // Code 128 fallback
+      status.className = 'scan-status ok';
+      status.textContent = '✓ Read a ' + r.format + ' code (not a watch-supported type — set to Code 128; change the format if needed).';
+    }
+    var nameEl = document.getElementById('cardName');
+    nameEl.focus();
+  }).catch(function(e) {
+    status.className = 'scan-status err';
+    status.textContent = 'Scanner unavailable (' + e + '). You can type the number in manually.';
+  });
 }
 
 // Pre-render all barcodes via bwip-js then save

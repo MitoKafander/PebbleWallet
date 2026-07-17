@@ -1,7 +1,7 @@
 {
   "name": "pebble-wallet",
   "author": "mitokafander",
-  "version": "2.3.10",
+  "version": "2.4.0",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
@@ -26,6 +26,7 @@
       "KEY_HEIGHT",
       "KEY_DATA_LEN",
       "KEY_DATA_OFFSET",
+      "KEY_TEXT",
       "REQUEST_CARDS",
       "CONFIG_UPDATED",
       "CARD_COUNT",

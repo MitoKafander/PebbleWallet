@@ -8,7 +8,9 @@
 var CONFIG_URL = 'https://mitokafander.github.io/PebbleWallet/config/';
 // Bump on every release so the phone webview loads the latest config page
 // instead of a cached copy (the config page holds the barcode encoder).
-var CONFIG_VERSION = '2.3.10';
+var CONFIG_VERSION = '2.4.0';
+
+var MAX_TEXT_LEN = 255;   // must match MAX_TEXT_LEN in common.h
 
 function loadCards() {
     try {
@@ -149,7 +151,9 @@ function syncToWatch(cards) {
     for (var index = 0; index < cards.length && synced < 10; index++) {
         var c = cards[index];
         var m = cardToMatrix(c);
-        var cost = PER_CARD_OVERHEAD + m.bytes.length;
+        // The raw text rides in the header so the watch can show it on demand.
+        var cardText = (c.text || '').substring(0, MAX_TEXT_LEN);
+        var cost = PER_CARD_OVERHEAD + m.bytes.length + cardText.length;
 
         // Blocking budget guard: never queue a card that would push the watch
         // past its ~4KB persist limit — a partially-persisted card renders as a
@@ -169,7 +173,8 @@ function syncToWatch(cards) {
             'KEY_FORMAT': parseInt(c.format) || 0,
             'KEY_WIDTH': m.width,
             'KEY_HEIGHT': m.height,
-            'KEY_DATA_LEN': m.bytes.length
+            'KEY_DATA_LEN': m.bytes.length,
+            'KEY_TEXT': cardText
         });
 
         for (var off = 0; off < m.bytes.length; off += CHUNK_SIZE) {

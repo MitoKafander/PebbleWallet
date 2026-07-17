@@ -13,6 +13,21 @@ static Layer *s_barcode_layer;
 static int s_current_index = 0;
 static bool s_loading = true;
 
+// Detail-view interaction state.
+// - s_backlight_on: constant backlight while viewing a code (SELECT short press).
+//   Defaults OFF and is forced OFF on exit so list navigation behaves normally.
+// - s_text_mode: SELECT long-press toggles between the barcode and its raw text.
+// - s_detail_text: the current card's human-readable text (loaded on demand).
+static bool s_backlight_on = false;
+static bool s_text_mode = false;
+static int s_text_scroll = 0;
+static char s_detail_text[MAX_TEXT_LEN + 1];
+
+// Raw text for the card currently being received over the sync stream. It rides
+// in the header message, so stash it until the matrix finishes and we persist.
+static char s_rx_text[MAX_TEXT_LEN + 1];
+static int s_rx_text_len = 0;
+
 // Chunked-sync reassembly state. A card arrives as one header message
 // (KEY_DATA_LEN) followed by N data-chunk messages (KEY_DATA_OFFSET + KEY_DATA).
 // Chunks are reassembled into g_active_bits (reused as staging to save RAM on
@@ -78,7 +93,9 @@ static bool load_demo_data(int index) {
 
 // Persist a fully-reassembled card and refresh the menu.
 static void finalize_rx_card(int i) {
-    bool ok = storage_save_card(i, &g_cards[i], g_active_bits, s_rx_expected);
+    g_cards[i].text_len = (uint16_t)s_rx_text_len;
+    bool ok = storage_save_card(i, &g_cards[i], g_active_bits, s_rx_expected,
+                                s_rx_text, s_rx_text_len);
     if (i >= g_card_count) {
         g_card_count = i + 1;
         storage_save_count(g_card_count);
@@ -91,6 +108,7 @@ static void finalize_rx_card(int i) {
     s_rx_index = -1;
     s_rx_expected = 0;
     s_rx_received = 0;
+    s_rx_text_len = 0;
     s_loading = false;
     menu_layer_reload_data(s_menu_layer);
 }
@@ -124,6 +142,7 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         Tuple *t_fmt = dict_find(iter, MESSAGE_KEY_KEY_FORMAT);
         Tuple *t_w = dict_find(iter, MESSAGE_KEY_KEY_WIDTH);
         Tuple *t_h = dict_find(iter, MESSAGE_KEY_KEY_HEIGHT);
+        Tuple *t_text = dict_find(iter, MESSAGE_KEY_KEY_TEXT);
 
         strncpy(g_cards[i].name, t_name ? t_name->value->cstring : "", MAX_NAME_LEN - 1);
         g_cards[i].name[MAX_NAME_LEN - 1] = '\0';
@@ -132,6 +151,16 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         g_cards[i].format = t_fmt ? (BarcodeFormat)t_fmt->value->int32 : FORMAT_CODE128;
         g_cards[i].width = t_w ? t_w->value->int32 : 0;
         g_cards[i].height = t_h ? t_h->value->int32 : 0;
+
+        // Stash the raw text (rides in the header) until finalize persists it.
+        if (t_text) {
+            strncpy(s_rx_text, t_text->value->cstring, MAX_TEXT_LEN);
+            s_rx_text[MAX_TEXT_LEN] = '\0';
+            s_rx_text_len = strlen(s_rx_text);
+        } else {
+            s_rx_text[0] = '\0';
+            s_rx_text_len = 0;
+        }
 
         int expected = t_len->value->int32;
         if (expected < 0) expected = 0;
@@ -176,6 +205,13 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
     // 4. Sync complete
     if (dict_find(iter, MESSAGE_KEY_CMD_SYNC_COMPLETE)) {
         APP_LOG(APP_LOG_LEVEL_INFO, "Sync complete: %d cards", g_card_count);
+        // If the detail view is open, its data may have just been overwritten by
+        // the sync — reload it now that the shared staging buffer is free again.
+        if (s_barcode_layer && window_stack_get_top_window() == s_detail_window) {
+            if (s_current_index >= g_card_count) s_current_index = 0;
+            load_current_card_data();
+            layer_mark_dirty(s_barcode_layer);
+        }
         return;
     }
 
@@ -198,6 +234,30 @@ static void outbox_failed_callback(DictionaryIterator *iterator, AppMessageResul
 // ============================================================================
 
 #define DETAIL_NAME_H 22   // top strip showing the card name
+#define TEXT_VIEW_FONT FONT_KEY_GOTHIC_24_BOLD
+
+// Text-view content box (width available for wrapping the raw text).
+static GRect text_content_box(GRect bounds) {
+    return GRect(bounds.origin.x + 4, 0, bounds.size.w - 8, 2000);
+}
+
+// A small sun glyph in the top-right of the name strip, shown only while the
+// constant backlight is toggled on, so its state is obvious at a glance.
+static void draw_backlight_indicator(GContext *ctx, GRect bounds) {
+    if (!s_backlight_on) return;
+    int cx = bounds.origin.x + bounds.size.w - 11;
+    int cy = bounds.origin.y + 10;
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_circle(ctx, GPoint(cx, cy), 3);
+    for (int a = 0; a < 8; a++) {
+        int32_t ang = (TRIG_MAX_ANGLE * a) / 8;
+        int32_t co = cos_lookup(ang), si = sin_lookup(ang);
+        graphics_draw_line(ctx,
+            GPoint(cx + (5 * co) / TRIG_MAX_RATIO, cy + (5 * si) / TRIG_MAX_RATIO),
+            GPoint(cx + (8 * co) / TRIG_MAX_RATIO, cy + (8 * si) / TRIG_MAX_RATIO));
+    }
+}
 
 static void barcode_update_proc(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
@@ -209,22 +269,39 @@ static void barcode_update_proc(Layer *layer, GContext *ctx) {
     if (s_current_index >= 0 && s_current_index < g_card_count) {
         WalletCardInfo *info = &g_cards[s_current_index];
 
-        // Card name at the top (so you can tell which card you're on while
-        // cycling with up/down), barcode fills the area below it.
+        if (s_text_mode) {
+            // Raw human-readable code, wrapped and scrolled. Drawn first so the
+            // name strip below can mask anything that scrolls up under it.
+            graphics_context_set_text_color(ctx, GColorBlack);
+            GRect tb = text_content_box(bounds);
+            tb.origin.y = bounds.origin.y + DETAIL_NAME_H - s_text_scroll;
+            const char *txt = (s_detail_text[0] != '\0') ? s_detail_text : "(no code text)";
+            graphics_draw_text(ctx, txt, fonts_get_system_font(TEXT_VIEW_FONT), tb,
+                GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+        } else {
+            GRect code_bounds = GRect(bounds.origin.x, bounds.origin.y + DETAIL_NAME_H,
+                                      bounds.size.w, bounds.size.h - DETAIL_NAME_H);
+            barcode_draw(ctx, code_bounds, info->format,
+                         info->width, info->height, g_active_bits);
+        }
+
+        // Name strip on top (so you can tell which card you're on while cycling,
+        // and to mask any text scrolled up behind it), then the backlight badge.
+        graphics_context_set_fill_color(ctx, GColorWhite);
+        graphics_fill_rect(ctx, GRect(bounds.origin.x, bounds.origin.y,
+                           bounds.size.w, DETAIL_NAME_H), 0, GCornerNone);
         graphics_context_set_text_color(ctx, GColorBlack);
         graphics_draw_text(ctx, info->name,
             fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-            GRect(2, -1, bounds.size.w - 4, DETAIL_NAME_H),
+            GRect(bounds.origin.x + 2, bounds.origin.y - 1, bounds.size.w - 4, DETAIL_NAME_H),
             GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-
-        GRect code_bounds = GRect(bounds.origin.x, bounds.origin.y + DETAIL_NAME_H,
-                                  bounds.size.w, bounds.size.h - DETAIL_NAME_H);
-        barcode_draw(ctx, code_bounds, info->format,
-                     info->width, info->height, g_active_bits);
+        draw_backlight_indicator(ctx, bounds);
     }
 }
 
 static void load_current_card_data(void) {
+    s_detail_text[0] = '\0';
+    s_text_scroll = 0;
     if (s_current_index >= 0 && s_current_index < g_card_count) {
         // Clear first: g_active_bits is shared with the sync reassembly buffer,
         // so wipe any stale bytes before loading this card.
@@ -235,33 +312,76 @@ static void load_current_card_data(void) {
         WalletCardInfo *c = &g_cards[s_current_index];
         if (c->width == 0 && c->height == 0 && c->data_len == 0) {
             load_demo_data(s_current_index);
+            strncpy(s_detail_text, (const char *)g_active_bits, MAX_TEXT_LEN);
+            s_detail_text[MAX_TEXT_LEN] = '\0';
         } else {
             storage_load_card_data(s_current_index, g_active_bits, MAX_BITS_LEN);
+            storage_load_card_text(s_current_index, s_detail_text, sizeof(s_detail_text));
         }
     }
 }
 
+// Height the raw text needs when wrapped at the current width, for scroll math.
+static int detail_text_height(void) {
+    if (s_detail_text[0] == '\0') return 0;
+    GRect b = layer_get_bounds(s_barcode_layer);
+    GSize sz = graphics_text_layout_get_content_size(s_detail_text,
+        fonts_get_system_font(TEXT_VIEW_FONT), text_content_box(b),
+        GTextOverflowModeWordWrap, GTextAlignmentCenter);
+    return sz.h;
+}
+
 static void detail_click_handler(ClickRecognizerRef recognizer, void *context) {
-    if (g_card_count <= 1) return;
-
     ButtonId btn = click_recognizer_get_button_id(recognizer);
-    if (btn == BUTTON_ID_DOWN) {
-        s_current_index = (s_current_index + 1) % g_card_count;
-    } else if (btn == BUTTON_ID_UP) {
-        s_current_index = (s_current_index - 1 + g_card_count) % g_card_count;
-    }
+    int dir = (btn == BUTTON_ID_DOWN) ? 1 : -1;
 
-    load_current_card_data();
+    GRect b = layer_get_bounds(s_barcode_layer);
+    int avail_h = b.size.h - DETAIL_NAME_H;
+    int content_h = s_text_mode ? detail_text_height() : 0;
+
+    if (s_text_mode && content_h > avail_h) {
+        // Long text (e.g. a boarding pass): up/down scroll it.
+        int max_scroll = content_h - avail_h;
+        s_text_scroll += dir * 30;
+        if (s_text_scroll < 0) s_text_scroll = 0;
+        if (s_text_scroll > max_scroll) s_text_scroll = max_scroll;
+    } else if (g_card_count > 1) {
+        // Otherwise up/down cycle cards (stays in the current view mode).
+        s_current_index = (s_current_index + dir + g_card_count) % g_card_count;
+        load_current_card_data();
+    }
+    layer_mark_dirty(s_barcode_layer);
+}
+
+// SELECT short press: toggle the constant backlight (defaults off).
+static void detail_select_click(ClickRecognizerRef recognizer, void *context) {
+    s_backlight_on = !s_backlight_on;
+    light_enable(s_backlight_on);
+    layer_mark_dirty(s_barcode_layer);
+}
+
+// SELECT long press: flip between the barcode and its raw code text.
+static void detail_select_long_click(ClickRecognizerRef recognizer, void *context) {
+    s_text_mode = !s_text_mode;
+    s_text_scroll = 0;
     layer_mark_dirty(s_barcode_layer);
 }
 
 static void detail_back_handler(ClickRecognizerRef recognizer, void *context) {
+    // Leaving the card view: drop the constant backlight so further navigation
+    // behaves normally, and remember this card to reopen it next launch.
+    if (s_backlight_on) { light_enable(false); s_backlight_on = false; }
+    s_text_mode = false;
+    s_text_scroll = 0;
+    storage_save_last_index(s_current_index);
     window_stack_pop(true);
 }
 
 static void detail_config_provider(void *ctx) {
     window_single_click_subscribe(BUTTON_ID_UP, detail_click_handler);
     window_single_click_subscribe(BUTTON_ID_DOWN, detail_click_handler);
+    window_single_click_subscribe(BUTTON_ID_SELECT, detail_select_click);
+    window_long_click_subscribe(BUTTON_ID_SELECT, 0, detail_select_long_click, NULL);
     window_single_click_subscribe(BUTTON_ID_BACK, detail_back_handler);
 }
 
@@ -273,12 +393,16 @@ static void detail_window_load(Window *window) {
 }
 
 static void detail_window_unload(Window *window) {
+    // Safety net: never leave the backlight forced on after the window closes.
+    if (s_backlight_on) { light_enable(false); s_backlight_on = false; }
     layer_destroy(s_barcode_layer);
     s_barcode_layer = NULL;
 }
 
 static void show_detail_window(int index) {
     s_current_index = index;
+    s_text_mode = false;
+    s_text_scroll = 0;
 
     // Load card data into g_active_bits before showing
     load_current_card_data();
@@ -428,11 +552,23 @@ static void init(void) {
     });
     window_stack_push(s_main_window, true);
 
-    // Request fresh cards from phone
-    app_timer_register(500, request_cards_from_phone, NULL);
+    // Jump straight to the last-viewed card (handy for boarding passes / your
+    // most-used card). Back returns to the list. Only when cards are already
+    // persisted — a fresh install still shows the list/loading state first.
+    if (g_card_count > 0) {
+        int last = storage_load_last_index();
+        if (last >= 0 && last < g_card_count) {
+            show_detail_window(last);
+        }
+    }
 
-    // Timeout: if no response and no persisted cards, show demos
+    // Only pull from the phone when nothing is persisted. The config page syncs
+    // on close, so stored cards are already current; re-syncing on every launch
+    // would blank/flicker the card we just opened (g_active_bits is the shared
+    // sync-staging buffer). A fresh install (or a storage-schema wipe) has 0
+    // cards, requests them, and falls back to demo cards if the phone is silent.
     if (g_card_count == 0) {
+        app_timer_register(500, request_cards_from_phone, NULL);
         app_timer_register(3000, loading_timeout, NULL);
     }
 }
