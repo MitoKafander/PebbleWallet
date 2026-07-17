@@ -143,6 +143,25 @@ function generateMatrixData(text, formatId) {
         return;
       }
 
+      // Code 39: bwip renders it at a 3:1 wide:narrow ratio, which is too wide
+      // to fit ~9 characters on the watch. Rebuild from raw() bar/space widths
+      // at the narrower (still spec-legal) 2:1 ratio: ~19% narrower, so more
+      // characters fit and scan. Stored as a single row (watch samples one row).
+      if (formatId === 1 && typeof bwipjs.raw === 'function') {
+        var sym39 = bwipjs.raw({ bcid: 'code39', text: text })[0];
+        var widths = String(sym39.sbs).split(',').map(function (s) { return parseInt(s, 10); });
+        var bits = [];
+        var black = true;
+        for (var wi = 0; wi < widths.length; wi++) {
+          if (!(widths[wi] > 0)) continue;
+          var wd = widths[wi] >= 3 ? 2 : 1;   // wide bar 3 -> 2 (2:1 ratio)
+          for (var kk = 0; kk < wd; kk++) bits.push(black ? 1 : 0);
+          black = !black;
+        }
+        resolve(packGrid(function (r, c) { return bits[c]; }, bits.length, 1));
+        return;
+      }
+
       // 1D codes (and fallback if raw() is unavailable): render to canvas.
       var options = {
         bcid: fmt.bwip, text: text, scale: 1,

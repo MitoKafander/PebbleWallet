@@ -1,7 +1,7 @@
 {
   "name": "pebble-wallet",
   "author": "mitokafander",
-  "version": "2.3.8",
+  "version": "2.3.9",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},
