@@ -53,9 +53,12 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 <h2>Add New Card</h2>
 <div class="section">
   <div class="form-group">
-    <button type="button" class="btn btn-scan" id="scanBtn" onclick="startScan()">📷 Scan a card with your camera</button>
-    <input type="file" id="scanInput" accept="image/*" capture="environment" style="display:none" onchange="handleScanFile(event)">
-    <div id="scanStatus" class="scan-status">Point your camera at a barcode or QR code to fill the fields automatically.</div>
+    <label class="btn btn-scan" id="scanLabel" onclick="scanTap()" style="display:block;text-align:center;box-sizing:border-box;">
+      📷 Scan a card with your camera
+      <input type="file" id="scanInput" accept="image/*" capture="environment"
+             style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;" onchange="handleScanFile(event)">
+    </label>
+    <div id="scanStatus" class="scan-status">Point your camera at a barcode or QR code to fill the fields automatically. (Needs internet + camera permission. No camera? Just type the number below.)</div>
   </div>
   <div class="form-group">
     <label for="cardName">Card Name</label>
@@ -342,17 +345,30 @@ var ZXING_FORMAT_MAP = {
   'QRCode': 3, 'MicroQRCode': 3, 'Aztec': 4, 'PDF417': 5
 };
 
+// Dynamic import kept OUT of the parsed source (built via Function at call time)
+// so an older webview engine that doesn't support import() fails here at runtime
+// — caught below — instead of throwing a parse-time SyntaxError that would kill
+// this entire <script> (breaking scan AND Save & Sync). Everything else on this
+// page is plain ES5 on purpose.
+function dynImport(url) { return (new Function('u', 'return import(u);'))(url); }
+
 var _zxing = null;
 function loadZxing() {
   if (_zxing) return Promise.resolve(_zxing);
   // esm.sh resolves the .wasm automatically; jsdelivr's +esm is the fallback.
-  return import('https://esm.sh/zxing-wasm@2/reader')
-    .catch(function() { return import('https://cdn.jsdelivr.net/npm/zxing-wasm@2/reader/+esm'); })
+  return dynImport('https://esm.sh/zxing-wasm@2/reader')
+    .catch(function() { return dynImport('https://cdn.jsdelivr.net/npm/zxing-wasm@2/reader/+esm'); })
     .then(function(mod) { _zxing = mod; return mod; });
 }
 
-function startScan() {
-  document.getElementById('scanInput').click();
+// Immediate feedback the moment the label is tapped, so "nothing happens" turns
+// into a visible signal: if this text appears but no picker opens, the webview
+// is blocking the camera/file input (fall back to typing the number).
+function scanTap() {
+  var s = document.getElementById('scanStatus');
+  if (!s) return;
+  s.className = 'scan-status';
+  s.textContent = 'Opening camera…';
 }
 
 function handleScanFile(ev) {

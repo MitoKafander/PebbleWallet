@@ -8,7 +8,7 @@
 var CONFIG_URL = 'https://mitokafander.github.io/PebbleWallet/config/';
 // Bump on every release so the phone webview loads the latest config page
 // instead of a cached copy (the config page holds the barcode encoder).
-var CONFIG_VERSION = '2.4.0';
+var CONFIG_VERSION = '2.4.1';
 
 var MAX_TEXT_LEN = 255;   // must match MAX_TEXT_LEN in common.h
 
