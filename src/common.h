@@ -5,9 +5,17 @@
 #define MAX_CARDS 10
 #define MAX_NAME_LEN 32
 #define MAX_DATA_LEN 1024
-// 1000 bytes of raw bits = 8000 pixels (enough for ~88x88 2D or large 1D)
-#define MAX_BITS_LEN 1000
+// 1400 bytes of raw bits = 11200 pixels (~105x106 2D, e.g. a full boarding-pass
+// PDF417). Matrices this large are streamed from the phone in 80-byte chunks
+// (see main.c chunked-sync protocol) so they are no longer capped by the
+// AppMessage inbox size. Note: Pebble persistent storage is ~4KB total per app,
+// so only a few cards this large can be stored at once (see storage.c).
+#define MAX_BITS_LEN 1400
 #define PERSIST_KEY_COUNT 500
+#define PERSIST_KEY_SCHEMA 501
+// Bump when the persistent card layout changes so upgrades wipe cleanly.
+// v3 = chunked-sync layout (KEYS_PER_CARD 15, MAX_BITS_LEN 1400) introduced 2.3.0.
+#define STORAGE_SCHEMA_VERSION 3
 #define PERSIST_KEY_BASE 24200
 
 // --- Types ---
@@ -37,9 +45,10 @@ extern uint8_t g_active_bits[MAX_BITS_LEN]; // On-demand loaded barcode data
 
 // --- Storage ---
 void storage_load_cards(void);
-void storage_save_card(int index, WalletCardInfo *info, const uint8_t *bits, int bits_len);
+bool storage_save_card(int index, WalletCardInfo *info, const uint8_t *bits, int bits_len);
 void storage_save_count(int count);
 void storage_load_card_data(int index, uint8_t *buffer, int max_len);
+void storage_wipe_all_cards(void);
 
 // --- QR Generator (on-watch fallback for small alphanumeric QR) ---
 bool qr_generate_packed(const char *data, uint8_t *output_buffer, uint8_t *out_size);

@@ -13,6 +13,14 @@ static Layer *s_barcode_layer;
 static int s_current_index = 0;
 static bool s_loading = true;
 
+// Chunked-sync reassembly state. A card arrives as one header message
+// (KEY_DATA_LEN) followed by N data-chunk messages (KEY_DATA_OFFSET + KEY_DATA).
+// Chunks are reassembled into g_active_bits (reused as staging to save RAM on
+// aplite) and flushed to storage once the whole matrix has arrived.
+static int s_rx_index = -1;    // card index currently being received (-1 = none)
+static int s_rx_expected = 0;  // total matrix bytes expected for this card
+static int s_rx_received = 0;  // bytes reassembled so far
+
 // Forward declarations
 static void request_cards_from_phone(void *data);
 
@@ -68,67 +76,111 @@ static bool load_demo_data(int index) {
 // AppMessage Handling
 // ============================================================================
 
+// Persist a fully-reassembled card and refresh the menu.
+static void finalize_rx_card(int i) {
+    bool ok = storage_save_card(i, &g_cards[i], g_active_bits, s_rx_expected);
+    if (i >= g_card_count) {
+        g_card_count = i + 1;
+        storage_save_count(g_card_count);
+    }
+    APP_LOG(ok ? APP_LOG_LEVEL_INFO : APP_LOG_LEVEL_WARNING,
+            "Card %d: %s (%dx%d, %d bytes, fmt=%d)%s",
+            i, g_cards[i].name, g_cards[i].width, g_cards[i].height,
+            s_rx_expected, (int)g_cards[i].format,
+            ok ? "" : " [STORAGE FULL - may be truncated]");
+    s_rx_index = -1;
+    s_rx_expected = 0;
+    s_rx_received = 0;
+    s_loading = false;
+    menu_layer_reload_data(s_menu_layer);
+}
+
 static void inbox_received_handler(DictionaryIterator *iter, void *context) {
     // 1. Sync start (clears watch for incoming sync)
-    Tuple *t_sync_start = dict_find(iter, MESSAGE_KEY_CMD_SYNC_START);
-    if (t_sync_start) {
+    if (dict_find(iter, MESSAGE_KEY_CMD_SYNC_START)) {
         g_card_count = 0;
         storage_save_count(0);
+        storage_wipe_all_cards();  // free orphaned data from a previous larger sync
+        s_rx_index = -1;
+        s_rx_expected = 0;
+        s_rx_received = 0;
         s_loading = false;
         menu_layer_reload_data(s_menu_layer);
         return;
     }
 
-    // 2. Card data (binary protocol with KEY_WIDTH, KEY_HEIGHT, KEY_DATA)
     Tuple *t_idx = dict_find(iter, MESSAGE_KEY_KEY_INDEX);
-    Tuple *t_name = dict_find(iter, MESSAGE_KEY_KEY_NAME);
+    Tuple *t_len = dict_find(iter, MESSAGE_KEY_KEY_DATA_LEN);
+    Tuple *t_off = dict_find(iter, MESSAGE_KEY_KEY_DATA_OFFSET);
     Tuple *t_data = dict_find(iter, MESSAGE_KEY_KEY_DATA);
-    Tuple *t_fmt = dict_find(iter, MESSAGE_KEY_KEY_FORMAT);
 
-    if (t_idx && t_name && t_data && t_fmt) {
+    // 2. Card header: KEY_DATA_LEN present. Records metadata + opens reassembly.
+    if (t_idx && t_len) {
         int i = t_idx->value->int32;
-        if (i >= 0 && i < MAX_CARDS) {
-            Tuple *t_desc = dict_find(iter, MESSAGE_KEY_KEY_DESCRIPTION);
-            Tuple *t_w = dict_find(iter, MESSAGE_KEY_KEY_WIDTH);
-            Tuple *t_h = dict_find(iter, MESSAGE_KEY_KEY_HEIGHT);
+        if (i < 0 || i >= MAX_CARDS) return;
 
-            strncpy(g_cards[i].name, t_name->value->cstring, MAX_NAME_LEN - 1);
-            strncpy(g_cards[i].description,
-                    t_desc ? t_desc->value->cstring : "", MAX_NAME_LEN - 1);
-            g_cards[i].format = (BarcodeFormat)t_fmt->value->int32;
-            g_cards[i].width = t_w ? t_w->value->int32 : 0;
-            g_cards[i].height = t_h ? t_h->value->int32 : 0;
-            g_cards[i].data_len = (uint16_t)t_data->length;
+        Tuple *t_name = dict_find(iter, MESSAGE_KEY_KEY_NAME);
+        Tuple *t_desc = dict_find(iter, MESSAGE_KEY_KEY_DESCRIPTION);
+        Tuple *t_fmt = dict_find(iter, MESSAGE_KEY_KEY_FORMAT);
+        Tuple *t_w = dict_find(iter, MESSAGE_KEY_KEY_WIDTH);
+        Tuple *t_h = dict_find(iter, MESSAGE_KEY_KEY_HEIGHT);
 
-            // Save binary data directly to persistent storage
-            storage_save_card(i, &g_cards[i], t_data->value->data, t_data->length);
+        strncpy(g_cards[i].name, t_name ? t_name->value->cstring : "", MAX_NAME_LEN - 1);
+        g_cards[i].name[MAX_NAME_LEN - 1] = '\0';
+        strncpy(g_cards[i].description, t_desc ? t_desc->value->cstring : "", MAX_NAME_LEN - 1);
+        g_cards[i].description[MAX_NAME_LEN - 1] = '\0';
+        g_cards[i].format = t_fmt ? (BarcodeFormat)t_fmt->value->int32 : FORMAT_CODE128;
+        g_cards[i].width = t_w ? t_w->value->int32 : 0;
+        g_cards[i].height = t_h ? t_h->value->int32 : 0;
 
-            if (i >= g_card_count) {
-                g_card_count = i + 1;
-                storage_save_count(g_card_count);
-            }
+        int expected = t_len->value->int32;
+        if (expected < 0) expected = 0;
+        if (expected > MAX_BITS_LEN) expected = MAX_BITS_LEN;  // clamp to buffer
+        g_cards[i].data_len = (uint16_t)expected;
 
-            s_loading = false;
-            menu_layer_reload_data(s_menu_layer);
+        s_rx_index = i;
+        s_rx_expected = expected;
+        s_rx_received = 0;
+        memset(g_active_bits, 0, MAX_BITS_LEN);
 
-            APP_LOG(APP_LOG_LEVEL_INFO, "Card %d: %s (%dx%d, %d bytes, fmt=%d)",
-                    i, g_cards[i].name,
-                    g_cards[i].width, g_cards[i].height, t_data->length,
-                    (int)g_cards[i].format);
+        if (expected == 0) {
+            finalize_rx_card(i);  // metadata-only card (no barcode data)
         }
         return;
     }
 
-    // 3. Sync complete
-    Tuple *t_complete = dict_find(iter, MESSAGE_KEY_CMD_SYNC_COMPLETE);
-    if (t_complete) {
+    // 3. Data chunk: KEY_DATA_OFFSET + KEY_DATA. Written at offset into staging.
+    if (t_idx && t_off && t_data) {
+        int i = t_idx->value->int32;
+        if (i != s_rx_index) return;  // header not seen / out of order — ignore
+
+        int offset = t_off->value->int32;
+        int len = (int)t_data->length;
+        if (offset < 0 || offset >= MAX_BITS_LEN) return;
+        if (offset + len > MAX_BITS_LEN) len = MAX_BITS_LEN - offset;
+        if (len <= 0) return;
+
+        memcpy(g_active_bits + offset, t_data->value->data, len);
+        s_rx_received += len;
+
+        // Chunks arrive in increasing-offset order, so completion = the final
+        // chunk landing. Using offset (not a byte counter) is safe against a
+        // duplicated chunk from an ack that was retried after the watch already
+        // stored it — which would otherwise finalize early with a missing tail.
+        if (offset + len >= s_rx_expected) {
+            finalize_rx_card(i);
+        }
+        return;
+    }
+
+    // 4. Sync complete
+    if (dict_find(iter, MESSAGE_KEY_CMD_SYNC_COMPLETE)) {
         APP_LOG(APP_LOG_LEVEL_INFO, "Sync complete: %d cards", g_card_count);
         return;
     }
 
-    // 4. Config updated notification (legacy)
-    Tuple *config_tuple = dict_find(iter, MESSAGE_KEY_CONFIG_UPDATED);
-    if (config_tuple) {
+    // 5. Config updated notification (legacy)
+    if (dict_find(iter, MESSAGE_KEY_CONFIG_UPDATED)) {
         request_cards_from_phone(NULL);
     }
 }
@@ -155,8 +207,18 @@ static void barcode_update_proc(Layer *layer, GContext *ctx) {
 
 static void load_current_card_data(void) {
     if (s_current_index >= 0 && s_current_index < g_card_count) {
-        // Always load from storage - works for both pre-rendered and text data
-        storage_load_card_data(s_current_index, g_active_bits, MAX_BITS_LEN);
+        // Clear first: g_active_bits is shared with the sync reassembly buffer,
+        // so wipe any stale bytes before loading this card.
+        memset(g_active_bits, 0, MAX_BITS_LEN);
+
+        // Demo cards carry no pre-rendered pixel data (width==0, data_len==0);
+        // stage their raw text so the on-watch fallback renderer can draw them.
+        WalletCardInfo *c = &g_cards[s_current_index];
+        if (c->width == 0 && c->height == 0 && c->data_len == 0) {
+            load_demo_data(s_current_index);
+        } else {
+            storage_load_card_data(s_current_index, g_active_bits, MAX_BITS_LEN);
+        }
     }
 }
 

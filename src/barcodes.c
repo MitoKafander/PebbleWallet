@@ -271,32 +271,66 @@ static void draw_code128_barcode(GContext *ctx, GRect bounds, const char *data) 
 
 // ============================================================================
 // 2D Code Renderer (QR, Aztec, PDF417)
-// Centers the code on screen with uniform integer scaling.
+// Centers the code on screen with uniform integer scaling. Wide codes (PDF417
+// boarding passes) are auto-rotated 90 degrees so the long axis runs down the
+// taller screen dimension — this yields much bigger, more scannable modules.
+// `max_bytes` guards against reading past the pixel buffer.
 // ============================================================================
 
-static void draw_2d_centered(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
-                             const uint8_t *bits) {
+static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
+                    const uint8_t *bits, int max_bytes) {
+    if (w == 0 || h == 0) return;
+
     int screen_w = bounds.size.w;
     int screen_h = bounds.size.h;
 
-    int scale_w = screen_w / w;
-    int scale_h = screen_h / h;
-    int scale = (scale_w < scale_h) ? scale_w : scale_h;
+    // Area used to compute scale. On round displays shrink to the inscribed
+    // square (~70%) so a 2D code's corners (QR finder patterns) stay on-glass;
+    // the code is still centered within the FULL bounds below.
+    int avail_w = screen_w;
+    int avail_h = screen_h;
+#if defined(PBL_ROUND)
+    avail_w = (screen_w * 70) / 100;
+    avail_h = (screen_h * 70) / 100;
+#endif
+
+    // Compare integer scale with and without a 90-degree rotation; pick whichever
+    // makes the modules bigger. Square codes (QR/Aztec) stay upright.
+    int scale_upright = avail_w / w;
+    int s2 = avail_h / h;
+    if (s2 < scale_upright) scale_upright = s2;
+
+    int scale_rot = avail_w / h;
+    int s3 = avail_h / w;
+    if (s3 < scale_rot) scale_rot = s3;
+
+    bool rotate = scale_rot > scale_upright;
+    int scale = rotate ? scale_rot : scale_upright;
     if (scale < 1) scale = 1;
 
-    int barcode_pixel_w = w * scale;
-    int barcode_pixel_h = h * scale;
-    int x_offset = (screen_w - barcode_pixel_w) / 2;
-    int y_offset = (screen_h - barcode_pixel_h) / 2;
+    // On-screen module extent (dx across, dy down) after optional rotation,
+    // centered within the full screen bounds.
+    int dx = rotate ? (int)h : (int)w;
+    int dy = rotate ? (int)w : (int)h;
+    int x_offset = (screen_w - dx * scale) / 2;
+    int y_offset = (screen_h - dy * scale) / 2;
 
     for (int r = 0; r < (int)h; r++) {
         for (int c = 0; c < (int)w; c++) {
-            int bit_idx = r * w + c;
-            bool is_black = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
-            if (is_black) {
-                graphics_fill_rect(ctx, GRect(x_offset + c * scale, y_offset + r * scale,
-                                              scale, scale), 0, GCornerNone);
+            int bit_idx = r * (int)w + c;
+            if ((bit_idx >> 3) >= max_bytes) continue;   // never read past buffer
+            if (!(bits[bit_idx >> 3] & (1 << (7 - (bit_idx & 7))))) continue;
+
+            int sx, sy;
+            if (rotate) {
+                // 90 deg clockwise: matrix (r,c) -> screen ((h-1-r), c)
+                sx = x_offset + ((int)h - 1 - r) * scale;
+                sy = y_offset + c * scale;
+            } else {
+                sx = x_offset + c * scale;
+                sy = y_offset + r * scale;
             }
+            graphics_fill_rect(ctx, GRect(sx, sy, scale, scale), 0, GCornerNone);
         }
     }
 }
@@ -315,6 +349,17 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     // Quiet zone margins (6px each end of bar pattern axis)
     int margin = 6;
     int available_h = screen_h - (margin * 2);
+
+    // If the barcode has more modules than the screen has pixels, it cannot be
+    // drawn at >=1px per module — squeezing it would merge bars into an
+    // unscannable smear. Be honest: tell the user instead of showing a broken code.
+    if ((int)w > available_h) {
+        graphics_context_set_text_color(ctx, GColorBlack);
+        graphics_draw_text(ctx, "Barcode too long\nfor this screen",
+            fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), bounds,
+            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+        return;
+    }
 
     // Integer scale only — preserves exact bar width ratios for scannability
     int scale = available_h / w;
@@ -335,6 +380,7 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int run_start = -1;
     for (int c = 0; c < (int)w; c++) {
         int bit_idx = r * w + c;
+        if ((bit_idx >> 3) >= MAX_BITS_LEN) break;   // never read past buffer
         bool is_black = (bits[bit_idx / 8] & (1 << (7 - (bit_idx % 8))));
 
         if (is_black) {
@@ -415,7 +461,7 @@ void barcode_draw(GContext *ctx, GRect bounds, BarcodeFormat format,
             case FORMAT_AZTEC:
             case FORMAT_PDF417:
             default:
-                draw_2d_centered(ctx, bounds, width, height, bits);
+                draw_2d(ctx, bounds, width, height, bits, MAX_BITS_LEN);
                 break;
         }
         return;

@@ -89,69 +89,110 @@ function cropBitmap(width, height, hex) {
 }
 
 // --- Sync Protocol ---
+//
+// Large barcodes (e.g. PDF417 boarding passes) no longer have to fit in one
+// AppMessage. Each card is streamed as:
+//   1. a header  { KEY_INDEX, KEY_NAME, KEY_DESCRIPTION, KEY_FORMAT,
+//                  KEY_WIDTH, KEY_HEIGHT, KEY_DATA_LEN }
+//   2. N chunks  { KEY_INDEX, KEY_DATA_OFFSET, KEY_DATA(<=80 bytes) }
+// The watch reassembles the chunks by offset (see main.c).
 
-function syncToWatch(cards) {
-    console.log('Syncing ' + cards.length + ' cards to watch');
-    Pebble.sendAppMessage({'CMD_SYNC_START': 1}, function() {
-        sendNextCard(cards, 0);
+var CHUNK_SIZE = 80;            // bytes of pixel data per AppMessage
+var MAX_CARD_BYTES = 1400;      // must match MAX_BITS_LEN in common.h
+var STORAGE_BUDGET = 3900;      // Pebble persist is ~4KB/app; keep a safety margin
+var PER_CARD_OVERHEAD = 80;     // approx bytes the WalletCardInfo struct persists
+
+// Turn a card into { width, height, bytes[] } using the config page's "w,h,hex".
+function cardToMatrix(c) {
+    var rawData = c.data || c.text || '';
+    if (rawData.indexOf(',') === -1) {
+        return { width: 0, height: 0, bytes: [] };
+    }
+    var parts = rawData.split(',');
+    var opt = cropBitmap(parseInt(parts[0]), parseInt(parts[1]), parts[2]);
+    var bytes = [];
+    for (var i = 0; i < opt.hex.length; i += 2) {
+        bytes.push(parseInt(opt.hex.substr(i, 2), 16));
+    }
+    if (bytes.length > MAX_CARD_BYTES) {
+        // Too big for the watch buffer. Sending a truncated matrix would render
+        // a corrupt, unscannable partial — send nothing instead so the card is
+        // clearly blank ("Resync from phone") rather than misleadingly wrong.
+        return { width: 0, height: 0, bytes: [], oversize: true };
+    }
+    return { width: opt.width, height: opt.height, bytes: bytes, oversize: false };
+}
+
+// Send a queue of AppMessages one at a time, retrying each up to 5 times.
+function sendQueue(queue, idx, retries, onDone) {
+    if (idx >= queue.length) { if (onDone) onDone(); return; }
+    Pebble.sendAppMessage(queue[idx], function() {
+        setTimeout(function() { sendQueue(queue, idx + 1, 0, onDone); }, 60);
     }, function(e) {
-        console.log('Sync start failed: ' + JSON.stringify(e));
+        if (retries < 5) {
+            setTimeout(function() { sendQueue(queue, idx, retries + 1, onDone); }, 200);
+        } else {
+            console.log('Sync aborted at message ' + idx + ': ' + JSON.stringify(e));
+        }
     });
 }
 
-function sendNextCard(cards, index) {
-    if (index >= cards.length) {
-        Pebble.sendAppMessage({'CMD_SYNC_COMPLETE': 1});
-        console.log('Sync complete');
-        return;
+function syncToWatch(cards) {
+    console.log('Syncing ' + cards.length + ' cards to watch');
+    var queue = [{ 'CMD_SYNC_START': 1 }];
+    var projected = 16;  // small global overhead
+
+    var synced = 0, dropped = 0;
+    for (var index = 0; index < cards.length && synced < 10; index++) {
+        var c = cards[index];
+        var m = cardToMatrix(c);
+        var cost = PER_CARD_OVERHEAD + m.bytes.length;
+
+        // Blocking budget guard: never queue a card that would push the watch
+        // past its ~4KB persist limit — a partially-persisted card renders as a
+        // truncated, unscannable barcode. Skip it (and warn) instead.
+        if (projected + cost > STORAGE_BUDGET) {
+            dropped++;
+            console.log('Storage budget reached (' + projected + '/' + STORAGE_BUDGET +
+                ' bytes) — skipping card "' + c.name + '".');
+            continue;
+        }
+        projected += cost;
+
+        queue.push({
+            'KEY_INDEX': synced,
+            'KEY_NAME': c.name || '',
+            'KEY_DESCRIPTION': c.description || '',
+            'KEY_FORMAT': parseInt(c.format) || 0,
+            'KEY_WIDTH': m.width,
+            'KEY_HEIGHT': m.height,
+            'KEY_DATA_LEN': m.bytes.length
+        });
+
+        for (var off = 0; off < m.bytes.length; off += CHUNK_SIZE) {
+            queue.push({
+                'KEY_INDEX': synced,
+                'KEY_DATA_OFFSET': off,
+                'KEY_DATA': m.bytes.slice(off, off + CHUNK_SIZE)
+            });
+        }
+        if (m.oversize) {
+            console.log('WARNING: card "' + c.name + '" barcode is too large for the ' +
+                'watch (>' + MAX_CARD_BYTES + ' bytes) — sent blank. Use fewer characters ' +
+                'or a denser format.');
+        }
+        console.log('Queued card ' + synced + ': ' + c.name +
+            ' ' + m.width + 'x' + m.height + ' (' + m.bytes.length + ' bytes)');
+        synced++;
     }
 
-    var c = cards[index];
-    var dict = {
-        'KEY_INDEX': index,
-        'KEY_NAME': c.name || '',
-        'KEY_DESCRIPTION': c.description || '',
-        'KEY_FORMAT': parseInt(c.format) || 0
-    };
+    queue.push({ 'CMD_SYNC_COMPLETE': 1 });
 
-    // Parse pre-rendered "w,h,hex" data from config page
-    var rawData = c.data || c.text || '';
-    if (rawData.indexOf(',') > -1) {
-        var parts = rawData.split(',');
-        var rawW = parseInt(parts[0]);
-        var rawH = parseInt(parts[1]);
-        var hex = parts[2];
-
-        // Crop whitespace borders to maximize scaling on watch
-        var optimized = cropBitmap(rawW, rawH, hex);
-
-        dict['KEY_WIDTH'] = optimized.width;
-        dict['KEY_HEIGHT'] = optimized.height;
-        var bytes = [];
-        for (var i = 0; i < optimized.hex.length; i += 2) {
-            bytes.push(parseInt(optimized.hex.substr(i, 2), 16));
-        }
-        dict['KEY_DATA'] = bytes;
-    } else {
-        dict['KEY_WIDTH'] = 0;
-        dict['KEY_HEIGHT'] = 0;
-        var bytes = [];
-        for (var i = 0; i < rawData.length; i++) {
-            bytes.push(rawData.charCodeAt(i));
-        }
-        dict['KEY_DATA'] = bytes;
+    if (dropped > 0) {
+        console.log('NOTE: ' + dropped + ' card(s) did not fit in Pebble storage and were skipped.');
     }
 
-    console.log('Sending card ' + index + ': ' + c.name +
-        ' w=' + dict['KEY_WIDTH'] + ' h=' + dict['KEY_HEIGHT'] +
-        ' data=' + (dict['KEY_DATA'] ? dict['KEY_DATA'].length : 0) + ' bytes');
-
-    Pebble.sendAppMessage(dict, function() {
-        sendNextCard(cards, index + 1);
-    }, function(e) {
-        console.log('Card ' + index + ' failed, retrying: ' + JSON.stringify(e));
-        setTimeout(function() { sendNextCard(cards, index); }, 1000);
-    });
+    sendQueue(queue, 0, 0, function() { console.log('Sync complete (' + synced + ' cards)'); });
 }
 
 // --- Events ---

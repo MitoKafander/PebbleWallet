@@ -122,7 +122,17 @@ function generateMatrixData(text, formatId) {
       };
 
       // Format-specific options
-      if (formatId == 5) { options.columns = 2; options.eclevel = 1; } // PDF417
+      if (formatId == 5) {
+        // PDF417: pick column count from data length so long boarding-pass
+        // payloads stay a scannable shape instead of a tall 2-column strip.
+        var len = (text || '').length;
+        options.columns = len <= 40 ? 2 : len <= 90 ? 3 : len <= 150 ? 4 : 5;
+        options.eclevel = 1;
+        // rowmult = row height as a multiple of module width (bwip-js default 3).
+        // 2 keeps the matrix ~1/3 shorter so a full boarding pass fits the watch's
+        // 1400-byte buffer, while staying tall enough for 2D imagers to read.
+        options.rowmult = 2;
+      }
       else if (formatId < 3) { options.height = 10; } // 1D barcodes
 
       bwipjs.toCanvas(canvas, options);
@@ -146,6 +156,9 @@ function generateMatrixData(text, formatId) {
         val = val << (4 - bitCount);
         hex += val.toString(16).toUpperCase();
       }
+      // Byte-align: the watch/phone re-parse this hex 2 chars (1 byte) at a time,
+      // so an odd nibble count would misread the final <=4 modules. Pad low nibble.
+      if (hex.length % 2) hex += '0';
 
       resolve(w + ',' + h + ',' + hex);
     } catch (e) {
