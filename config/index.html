@@ -53,12 +53,13 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 <h2>Add New Card</h2>
 <div class="section">
   <div class="form-group">
-    <label class="btn btn-scan" id="scanLabel" onclick="scanTap()" style="display:block;text-align:center;box-sizing:border-box;">
-      📷 Scan a card with your camera
-      <input type="file" id="scanInput" accept="image/*" capture="environment"
-             style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;" onchange="handleScanFile(event)">
-    </label>
-    <div id="scanStatus" class="scan-status">Point your camera at a barcode or QR code to fill the fields automatically. (Needs internet + camera permission. No camera? Just type the number below.)</div>
+    <button type="button" class="btn btn-scan" id="scanBtn" onclick="startScan()">📷 Scan a card with your camera</button>
+    <div id="scanView" style="display:none;margin-top:10px;">
+      <video id="scanVideo" playsinline autoplay muted style="width:100%;border-radius:8px;background:#000;"></video>
+      <button type="button" class="btn btn-delete" style="width:100%;margin-top:6px;" onclick="stopScan('Cancelled.')">Cancel</button>
+    </div>
+    <canvas id="scanFrame" style="display:none;"></canvas>
+    <div id="scanStatus" class="scan-status">Point your camera at a barcode or QR to fill the fields. Needs camera permission + internet.</div>
   </div>
   <div class="form-group">
     <label for="cardName">Card Name</label>
@@ -361,50 +362,85 @@ function loadZxing() {
     .then(function(mod) { _zxing = mod; return mod; });
 }
 
-// Immediate feedback the moment the label is tapped, so "nothing happens" turns
-// into a visible signal: if this text appears but no picker opens, the webview
-// is blocking the camera/file input (fall back to typing the number).
-function scanTap() {
+// The Pebble settings webview blocks the file/photo picker, so scan with a LIVE
+// camera stream (getUserMedia) decoded frame-by-frame instead. If the webview
+// also blocks getUserMedia, point the user at the standalone browser scanner.
+var SCAN_PAGE_URL = 'https://mitokafander.github.io/PebbleWallet/config/scan.html';
+var _stream = null, _scanning = false, _decoding = false;
+
+function setScanStatus(msg, cls, html) {
   var s = document.getElementById('scanStatus');
-  if (!s) return;
-  s.className = 'scan-status';
-  s.textContent = 'Opening camera…';
+  s.className = 'scan-status' + (cls ? ' ' + cls : '');
+  if (html) { s.innerHTML = msg; } else { s.textContent = msg; }
 }
 
-function handleScanFile(ev) {
-  var file = ev.target.files && ev.target.files[0];
-  ev.target.value = '';   // allow re-picking the same file
-  if (!file) return;
-  var status = document.getElementById('scanStatus');
-  status.className = 'scan-status';
-  status.textContent = 'Reading barcode…';
+function scanFallbackMsg(reason) {
+  setScanStatus('Camera blocked in this settings screen' + (reason ? ' (' + reason + ')' : '') +
+    '. Scan in your phone browser instead: <a href="' + SCAN_PAGE_URL + '" target="_blank" rel="noopener">open the scanner</a>, ' +
+    'copy the number, and paste it below.', 'err', true);
+}
 
-  loadZxing().then(function(mod) {
-    return mod.readBarcodes(file, { tryHarder: true, maxNumberOfSymbols: 1 });
-  }).then(function(results) {
-    if (!results || !results.length || !results[0].text) {
-      status.className = 'scan-status err';
-      status.textContent = 'No code found. Fill the frame with the barcode, hold steady, and try again.';
-      return;
-    }
-    var r = results[0];
-    document.getElementById('cardData').value = r.text;
-    var fmtId = ZXING_FORMAT_MAP[r.format];
-    if (fmtId !== undefined) {
-      document.getElementById('cardFormat').value = fmtId;
-      status.className = 'scan-status ok';
-      status.textContent = '✓ Scanned ' + r.format + '. Give it a name, then tap Add Card.';
-    } else {
-      document.getElementById('cardFormat').value = 0;   // Code 128 fallback
-      status.className = 'scan-status ok';
-      status.textContent = '✓ Read a ' + r.format + ' code (not a watch-supported type — set to Code 128; change the format if needed).';
-    }
-    var nameEl = document.getElementById('cardName');
-    nameEl.focus();
-  }).catch(function(e) {
-    status.className = 'scan-status err';
-    status.textContent = 'Scanner unavailable (' + e + '). You can type the number in manually.';
-  });
+function startScan() {
+  setScanStatus('Starting camera…', '');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    scanFallbackMsg('no camera API');
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+    .then(function(stream) {
+      _stream = stream;
+      var v = document.getElementById('scanVideo');
+      v.srcObject = stream;
+      document.getElementById('scanView').style.display = 'block';
+      document.getElementById('scanBtn').style.display = 'none';
+      _scanning = true;
+      setScanStatus('Point the camera at the barcode…', '');
+      setTimeout(scanTick, 500);
+    })
+    .catch(function(e) { scanFallbackMsg(e && e.name ? e.name : String(e)); });
+}
+
+function scanTick() {
+  if (!_scanning) return;
+  var v = document.getElementById('scanVideo');
+  if (!_decoding && v && v.videoWidth) {
+    _decoding = true;
+    var cnv = document.getElementById('scanFrame');
+    cnv.width = v.videoWidth; cnv.height = v.videoHeight;
+    var g = cnv.getContext('2d');
+    g.drawImage(v, 0, 0, cnv.width, cnv.height);
+    var img = g.getImageData(0, 0, cnv.width, cnv.height);
+    loadZxing().then(function(mod) {
+      return mod.readBarcodes(img, { tryHarder: true, maxNumberOfSymbols: 1 });
+    }).then(function(results) {
+      _decoding = false;
+      if (_scanning && results && results.length && results[0].text) onScanned(results[0]);
+    }).catch(function() { _decoding = false; });
+  }
+  if (_scanning) setTimeout(scanTick, 300);
+}
+
+function onScanned(r) {
+  stopScan('');
+  document.getElementById('cardData').value = r.text;
+  var fmtId = ZXING_FORMAT_MAP[r.format];
+  if (fmtId !== undefined) {
+    document.getElementById('cardFormat').value = fmtId;
+    setScanStatus('✓ Scanned ' + r.format + '. Give it a name, then tap Add Card.', 'ok');
+  } else {
+    document.getElementById('cardFormat').value = 0;   // Code 128 fallback
+    setScanStatus('✓ Read a ' + r.format + ' code (not a watch-supported type — set to Code 128; change if needed).', 'ok');
+  }
+  document.getElementById('cardName').focus();
+}
+
+function stopScan(msg) {
+  _scanning = false;
+  if (_stream) { _stream.getTracks().forEach(function(t) { t.stop(); }); _stream = null; }
+  var v = document.getElementById('scanVideo'); if (v) v.srcObject = null;
+  document.getElementById('scanView').style.display = 'none';
+  document.getElementById('scanBtn').style.display = '';
+  if (msg) setScanStatus(msg, '');
 }
 
 // Pre-render all barcodes via bwip-js then save
