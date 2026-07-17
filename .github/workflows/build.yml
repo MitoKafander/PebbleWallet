@@ -1,0 +1,68 @@
+name: Build Pebble Wallet
+
+# Auto-builds the .pbw on every push to main (same toolchain as the Rebble
+# Codespace: uv -> pebble-tool -> pebble sdk install latest -> pebble build),
+# then publishes it to a stable "latest" release you open on your phone to
+# install on the watch. No Codespace step needed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "resources/**"
+      - "package.json"
+      - "wscript"
+      - ".github/workflows/build.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed to publish the release asset
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SDL2 (emulator dep, mirrors the Codespace)
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install pebble-tool + SDK
+        run: |
+          uv tool install pebble-tool --python 3.13
+          # Non-interactive: keep the first-run analytics prompt from blocking CI.
+          pebble sdk install latest < /dev/null
+
+      - name: Build .pbw
+        run: pebble build < /dev/null
+
+      - name: Show build output
+        run: ls -la build/ && ls -la build/*.pbw
+
+      - name: Upload .pbw artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pebble-wallet
+          path: build/*.pbw
+          if-no-files-found: error
+
+      - name: Publish rolling "latest" release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Pebble Wallet — latest build
+          body: |
+            Auto-built from the latest push to `main`.
+            **Install on your watch:** open this page on your phone and tap the
+            `.pbw` below — the Rebble / Core Devices app will push it to the watch
+            (same UUID, so it updates the existing app in place).
+          files: build/*.pbw
+          fail_on_unmatched_files: true
