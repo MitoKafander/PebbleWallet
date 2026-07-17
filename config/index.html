@@ -25,10 +25,6 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 .card-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .btn-primary { background: #007aff; color: white; width: 100%; padding: 15px; font-size: 16px; }
 .btn-save { background: #34c759; color: white; width: 100%; padding: 15px; font-size: 16px; margin-top: 20px; }
-.btn-scan { background: #5856d6; color: white; width: 100%; padding: 14px; font-size: 16px; }
-.scan-status { font-size: 13px; margin-top: 8px; min-height: 16px; color: #666; }
-.scan-status.ok { color: #34c759; }
-.scan-status.err { color: #ff3b30; }
 .hint { font-size: 12px; color: #999; margin: -8px 0 12px; }
 .form-group { margin-bottom: 15px; }
 .form-group label { display: block; margin-bottom: 5px; font-weight: 500; color: #333; }
@@ -52,15 +48,6 @@ h2 { font-size: 18px; margin-top: 25px; margin-bottom: 15px; color: #333; }
 
 <h2>Add New Card</h2>
 <div class="section">
-  <div class="form-group">
-    <button type="button" class="btn btn-scan" id="scanBtn" onclick="startScan()">📷 Scan a card with your camera</button>
-    <div id="scanView" style="display:none;margin-top:10px;">
-      <video id="scanVideo" playsinline autoplay muted style="width:100%;border-radius:8px;background:#000;"></video>
-      <button type="button" class="btn btn-delete" style="width:100%;margin-top:6px;" onclick="stopScan('Cancelled.')">Cancel</button>
-    </div>
-    <canvas id="scanFrame" style="display:none;"></canvas>
-    <div id="scanStatus" class="scan-status">Point your camera at a barcode or QR to fill the fields. Needs camera permission + internet.</div>
-  </div>
   <div class="form-group">
     <label for="cardName">Card Name</label>
     <input type="text" id="cardName" placeholder="e.g., Starbucks, Target" maxlength="31">
@@ -331,116 +318,6 @@ function moveCard(index, dir) {
   if (j < 0 || j >= cards.length) return;
   var tmp = cards[index]; cards[index] = cards[j]; cards[j] = tmp;
   renderCards();
-}
-
-// --- Camera scan ---------------------------------------------------------
-// Snap a photo of a physical card and decode it with zxing-wasm, then fill the
-// data + format fields. Uses the native camera picker (file input w/ capture),
-// which webviews allow without the getUserMedia permission dance. The decoder
-// is loaded on demand from a CDN, so scanning needs an internet connection.
-
-// zxing-wasm format string -> our format id (see FORMATS above).
-var ZXING_FORMAT_MAP = {
-  'Code128': 0, 'Code39': 1, 'Code93': 0,
-  'EAN-13': 2, 'EAN-8': 2, 'UPC-A': 0, 'UPC-E': 0,
-  'QRCode': 3, 'MicroQRCode': 3, 'Aztec': 4, 'PDF417': 5
-};
-
-// Dynamic import kept OUT of the parsed source (built via Function at call time)
-// so an older webview engine that doesn't support import() fails here at runtime
-// — caught below — instead of throwing a parse-time SyntaxError that would kill
-// this entire <script> (breaking scan AND Save & Sync). Everything else on this
-// page is plain ES5 on purpose.
-function dynImport(url) { return (new Function('u', 'return import(u);'))(url); }
-
-var _zxing = null;
-function loadZxing() {
-  if (_zxing) return Promise.resolve(_zxing);
-  // esm.sh resolves the .wasm automatically; jsdelivr's +esm is the fallback.
-  return dynImport('https://esm.sh/zxing-wasm@2/reader')
-    .catch(function() { return dynImport('https://cdn.jsdelivr.net/npm/zxing-wasm@2/reader/+esm'); })
-    .then(function(mod) { _zxing = mod; return mod; });
-}
-
-// The Pebble settings webview blocks the file/photo picker, so scan with a LIVE
-// camera stream (getUserMedia) decoded frame-by-frame instead. If the webview
-// also blocks getUserMedia, point the user at the standalone browser scanner.
-var SCAN_PAGE_URL = 'https://mitokafander.github.io/PebbleWallet/config/scan.html';
-var _stream = null, _scanning = false, _decoding = false;
-
-function setScanStatus(msg, cls, html) {
-  var s = document.getElementById('scanStatus');
-  s.className = 'scan-status' + (cls ? ' ' + cls : '');
-  if (html) { s.innerHTML = msg; } else { s.textContent = msg; }
-}
-
-function scanFallbackMsg(reason) {
-  setScanStatus('Camera blocked in this settings screen' + (reason ? ' (' + reason + ')' : '') +
-    '. Scan in your phone browser instead: <a href="' + SCAN_PAGE_URL + '" target="_blank" rel="noopener">open the scanner</a>, ' +
-    'copy the number, and paste it below.', 'err', true);
-}
-
-function startScan() {
-  setScanStatus('Starting camera…', '');
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    scanFallbackMsg('no camera API');
-    return;
-  }
-  navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
-    .then(function(stream) {
-      _stream = stream;
-      var v = document.getElementById('scanVideo');
-      v.srcObject = stream;
-      document.getElementById('scanView').style.display = 'block';
-      document.getElementById('scanBtn').style.display = 'none';
-      _scanning = true;
-      setScanStatus('Point the camera at the barcode…', '');
-      setTimeout(scanTick, 500);
-    })
-    .catch(function(e) { scanFallbackMsg(e && e.name ? e.name : String(e)); });
-}
-
-function scanTick() {
-  if (!_scanning) return;
-  var v = document.getElementById('scanVideo');
-  if (!_decoding && v && v.videoWidth) {
-    _decoding = true;
-    var cnv = document.getElementById('scanFrame');
-    cnv.width = v.videoWidth; cnv.height = v.videoHeight;
-    var g = cnv.getContext('2d');
-    g.drawImage(v, 0, 0, cnv.width, cnv.height);
-    var img = g.getImageData(0, 0, cnv.width, cnv.height);
-    loadZxing().then(function(mod) {
-      return mod.readBarcodes(img, { tryHarder: true, maxNumberOfSymbols: 1 });
-    }).then(function(results) {
-      _decoding = false;
-      if (_scanning && results && results.length && results[0].text) onScanned(results[0]);
-    }).catch(function() { _decoding = false; });
-  }
-  if (_scanning) setTimeout(scanTick, 300);
-}
-
-function onScanned(r) {
-  stopScan('');
-  document.getElementById('cardData').value = r.text;
-  var fmtId = ZXING_FORMAT_MAP[r.format];
-  if (fmtId !== undefined) {
-    document.getElementById('cardFormat').value = fmtId;
-    setScanStatus('✓ Scanned ' + r.format + '. Give it a name, then tap Add Card.', 'ok');
-  } else {
-    document.getElementById('cardFormat').value = 0;   // Code 128 fallback
-    setScanStatus('✓ Read a ' + r.format + ' code (not a watch-supported type — set to Code 128; change if needed).', 'ok');
-  }
-  document.getElementById('cardName').focus();
-}
-
-function stopScan(msg) {
-  _scanning = false;
-  if (_stream) { _stream.getTracks().forEach(function(t) { t.stop(); }); _stream = null; }
-  var v = document.getElementById('scanVideo'); if (v) v.srcObject = null;
-  document.getElementById('scanView').style.display = 'none';
-  document.getElementById('scanBtn').style.display = '';
-  if (msg) setScanStatus(msg, '');
 }
 
 // Pre-render all barcodes via bwip-js then save
