@@ -188,20 +188,20 @@ static void draw_code128_barcode(GContext *ctx, GRect bounds, const char *data) 
     }
 
     int bar_height = bounds.size.h - 50;
-    int bar_y = 25;
+    int bar_y = bounds.origin.y + 25;
     int screen_margin = 6;
     int available_width = bounds.size.w - (screen_margin * 2);
     int module_width = available_width / bar_modules;
     if (module_width < 1) module_width = 1;
 
     int barcode_width = bar_modules * module_width;
-    int start_x = screen_margin + (available_width - barcode_width) / 2;
-    if (start_x < screen_margin) start_x = screen_margin;
-    int right_limit = bounds.size.w - screen_margin;
+    int start_x = bounds.origin.x + screen_margin + (available_width - barcode_width) / 2;
+    if (start_x < bounds.origin.x + screen_margin) start_x = bounds.origin.x + screen_margin;
+    int right_limit = bounds.origin.x + bounds.size.w - screen_margin;
 
     // White background
     graphics_context_set_fill_color(ctx, GColorWhite);
-    graphics_fill_rect(ctx, GRect(screen_margin, bar_y - 5, available_width, bar_height + 10), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(bounds.origin.x + screen_margin, bar_y - 5, available_width, bar_height + 10), 0, GCornerNone);
 
     int x = start_x;
 
@@ -312,8 +312,8 @@ static void draw_2d(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
 
     int dx = rotate ? (int)h : (int)w;   // modules across screen-x
     int dy = rotate ? (int)w : (int)h;   // modules down screen-y
-    int ox = (screen_w - dx * scale) / 2;
-    int oy = (screen_h - dy * scale) / 2;
+    int ox = bounds.origin.x + (screen_w - dx * scale) / 2;
+    int oy = bounds.origin.y + (screen_h - dy * scale) / 2;
 
     for (int r = 0; r < (int)h; r++) {
         for (int c = 0; c < (int)w; c++) {
@@ -348,11 +348,12 @@ static void draw_pdf417(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int mod_w = screen_w / (int)w;
     if (mod_w < 1) mod_w = 1;               // very wide symbols draw at 1px, may clip
     int drawn_w = mod_w * (int)w;
-    int ox = (screen_w - drawn_w) / 2;
+    int ox = bounds.origin.x + (screen_w - drawn_w) / 2;
 
     // Rows stretched to fill the height with clean integer boundaries.
-    int top = 2;
-    int avail_h = screen_h - 2 * top;
+    int pad = 2;
+    int top = bounds.origin.y + pad;
+    int avail_h = screen_h - 2 * pad;
 
     for (int r = 0; r < (int)h; r++) {
         int y0 = top + (r * avail_h) / (int)h;
@@ -392,13 +393,13 @@ static void draw_1d_rotated(GContext *ctx, GRect bounds, uint16_t w, uint16_t h,
     int scale = available_h / (int)w;
     if (scale < 1) scale = 1;   // longer codes render at 1px and may clip
     int drawn_h = (int)w * scale;
-    int y_offset = margin + (available_h - drawn_h) / 2;
+    int y_offset = bounds.origin.y + margin + (available_h - drawn_h) / 2;
 
     // Bar length across the screen. 1D codes need a quiet zone only at the two
     // ENDS of the bar pattern (the module axis), not along the bar length — so
     // make bars nearly full-width for a bigger, easier-to-scan target.
     int bar_len = screen_w - 8;
-    int x_offset = (screen_w - bar_len) / 2;
+    int x_offset = bounds.origin.x + (screen_w - bar_len) / 2;
 
     // Sample middle row of bitmap (all rows identical for 1D barcodes)
     int r = h / 2;
@@ -437,8 +438,8 @@ static void draw_qr_code_onwatch(GContext *ctx, GRect bounds, const char *data) 
         int scale = avail / size;
         if (scale < 2) scale = 2;
         int pix_size = size * scale;
-        int ox = (bounds.size.w - pix_size) / 2;
-        int oy = (bounds.size.h - pix_size) / 2;
+        int ox = bounds.origin.x + (bounds.size.w - pix_size) / 2;
+        int oy = bounds.origin.y + (bounds.size.h - pix_size) / 2;
 
         graphics_context_set_fill_color(ctx, GColorWhite);
         graphics_fill_rect(ctx, GRect(ox - 4, oy - 4, pix_size + 8, pix_size + 8), 0, GCornerNone);
